@@ -1,107 +1,137 @@
-# ABU 3D Visual — Handover
+# ABU Project — Handover
 
 **Date:** 2026-03-31
-**Status:** All nine GIFs complete and approved. Ready to move into website/book phase.
+**Status:** Phase 1 (GIFs) complete. Phase 2 PRD complete. Ready to plan/build the book website.
 
 ---
 
-## File inventory
+## What exists
 
-| File | What it shows | Status |
-|------|--------------|--------|
-| `A-frontier.html` | GIF 1 — base graph builds, frontier A nodes spawn outward in a chain | Complete |
-| `A-to-B.html` | GIF 2 — cyan laser fires from offscreen, strikes an A node, it matures into a B and the network reorganises | Complete |
-| `U-book-and-person.html` | GIF 3 combined — both U1 (book) approaches and snaps in, U2 (person) wobbles and fades | Complete |
-| `U-to-A.html` | GIF 3a — book U only: approach → snap (purple→red, joins graph) | Complete |
-| `U-rejected.html` | GIF 3b — person U only: approach → wobble/crackle → fade out | Complete |
-| `mal1-maladaptive-b-fires.html` | mal1 — B0 fires fire-red/orange pulse at external person; person burns, smokes, sphere turns red | Complete |
-| `mal2-feedback-rejected.html` | mal2 — smouldering red person (mal1 end-state) sends charged purple signal at B cluster; rejected; person smokes throughout | Complete |
-| `mal3-feedback-integrated-equal.html` | mal3 — smoking person sends purple packet to outer A frontier; snaps red (A), moves closer still red, turns green (B), equal binary orbit with B0 | Complete |
-| `mal4-feedback-integrated-dominant.html` | mal4 — same as mal3 but newB grows to 2× dominant; B0 shrinks to 0.5× moon | Complete |
+### Phase 1: GIF animations (complete)
 
-No build step. All files are standalone HTML, CDN-only (Three.js 0.160.0, gif.js 0.2.0).
+| File | What it shows |
+|------|--------------|
+| `A-frontier.html` | GIF 1 — A frontier growth |
+| `A-to-B.html` | GIF 2 — A→B maturation |
+| `U-book-and-person.html` | GIF 3 combined — U1 snaps in, U2 fades |
+| `U-to-A.html` | GIF 3a — book U only |
+| `U-rejected.html` | GIF 3b — person U only |
+| `mal1-maladaptive-b-fires.html` | mal1 — B0 fires at person |
+| `mal2-feedback-rejected.html` | mal2 — person feedback rejected |
+| `mal3-feedback-integrated-equal.html` | mal3 — feedback integrated, equal orbit |
+| `mal4-feedback-integrated-dominant.html` | mal4 — feedback integrated, dominant |
 
----
+All standalone HTML, CDN-only (Three.js 0.160.0, gif.js 0.2.0). No build step.
 
-## Git / remote
+### Phase 2: PRD (complete)
 
-- Local git repo initialised at this folder root.
-- Remote: `https://github.com/alex-is-learning/A-B-U-visuals` (branch `main`).
-- Changes from this session are NOT yet committed/pushed. Run `/commit` then `git push`.
+`_bmad-output/planning/prd-website-book.md` — full product requirements document for the book website. 43 functional requirements, 17 non-functional requirements, 4 user journeys, innovation analysis, scoping.
 
 ---
 
-## Architecture (applies to all files)
+## What we're building (Phase 2)
 
-- **Spring layout:** custom, no d3-force-3d. KR=6000, KS=0.04, KCB=0.06, KCA=0.006, DAMP=0.85. 300 settle ticks on init, 20–60 ticks per animation event.
-- **Node types:** B (green, radius 6, centre pull KCB), A (red, radius 4, centre pull KCA). B cluster sits centrally; A nodes form a radiating ring.
-- **Frustum clamp:** iterative binary search (24 iterations), camera-position-agnostic. Applied to all nodes after every spring update.
-- **Edge rendering:** pre-allocated `Float32Array(21×3)` per edge, updated in-place via `writeEdgeBuffer`. Curved bezier lines. No geometry disposal during animation.
-- **Scene rotation:** `scene.rotation.y = t * 0.00015` (Y pan), `scene.rotation.x = sin(t * 0.0003) * 0.10` (±5.7° X sway). Identical across all files.
-- **GIF export:** rebuilds base graph from scratch, replays full animation with `captureFrame` as `onFrame` callback. Blob URL worker (CORS bypass). 90s safety timeout.
-- **Canvas:** 800×600, camera at z=360, FOV 60°. Frustum at z=0 ≈ ±277 × ±208 world units.
+An **interactive book** teaching the A/B/U epistemological framework — a *metacognition-foregrounding medium*. Key mechanics:
 
----
+- Readers self-assess with **A/B/U buttons** at each section
+- **A/B** → advance to next section; **U** → descend to scaffold
+- **LLM chat** (RAG on book content) answers questions on U clicks — tier-1 support
+- **Text feedback form** (Formspree) — tier-2 escalation to Alex
+- **PostHog analytics** — A/B/U click heatmap per section; U-spikes = content research
+- **Pay-what-you-got** at the end — repeat payment capable (Gumroad/Stripe)
+- **Password-protected** for MVP inner-circle (Defender + collaborators)
 
-## mal3 / mal4 colour sequence (finalised this session)
-
-The A-to-B journey now has three distinct visual beats:
-
-1. **Purple** — packet charges up at the smoking person, travels to outer A frontier
-2. **Red (A snap)** — clicks into graph at the frontier, spring settles; node stays red while pulled inward toward B cluster (deliberately slow — half-speed lerp)
-3. **Green (B maturation)** — only turns green once it has arrived near the B cluster; size grows from A radius to B radius
-
-This was achieved by reordering phases: the spring-reorganise-as-B (still red) now happens BEFORE the green colour snap, not after.
+Analogous to Quantum Country / Orbit but for metacognition, with adaptive routing + LLM + value-based pricing.
 
 ---
 
-## mal3 / mal4 person mechanics (finalised this session)
+## Architectural decisions made
 
-Both mal3 and mal4 now match mal2's person pattern:
-
-- `personMesh` (red sphere, emissive `RGB(0.5,0,0)`, intensity 0.6) + `personIcon` (👤 sprite) created in `buildBaseGraph()`, cleaned up on rebuild.
-- `smokeParticles` array; `tickSmoke(pos)` called every animation frame and in the idle render loop.
-- `disposeSmoke()` called at top of `buildBaseGraph()`.
-- Packet spawns at `personPos` and grows during charge-up (person emissive pulses). Approach direction: person → outermost A node.
-- Person smokes throughout all phases of the animation.
-
-### Half-speed constants (mal3 & mal4)
-```
-SNAP_FRAMES  =  16   (was 8)
-LERP_FRAMES  =  28   (was 14)
-SIZE_FRAMES  =  28   (was 14)
-MATURE_LERP  =  76   (was 38)
-CHARGE_FRAMES = 12   (new — charge-up at person)
-```
-
----
-
-## Person position
-```
-PERSON_X = 210, PERSON_Y = 30, PERSON_Z = 0
-```
-Consistent across mal1, mal2, mal3, mal4.
+| Decision | Choice | Rationale |
+|---|---|---|
+| Hosting | Netlify | Free tier, auto-deploy from GitHub, built-in serverless functions, password protection options |
+| Static vs dynamic | Static SPA (single HTML shell, JS routing) | No build step, consistent with GIF architecture, no framework needed |
+| Content format | Markdown files, one per section | Author writes in Markdown; `marked.js` CDN renders client-side |
+| Branching config | `content.json` — maps section ID → A/B target, U target, stub flag | Editable without touching core JS; new sections = new file + config line |
+| LLM integration | Netlify serverless function (`netlify/functions/chat.js`) → Claude API | API key in env var, never browser-exposed; scales automatically |
+| LLM approach | RAG on book content + ~1% poetic license for novel metaphors | Bounds hallucination; allows generative explanations within framework |
+| Analytics | PostHog (free tier, custom events) | Per-section A/B/U heatmap; `posthog.capture('abu_click', {section, value})` |
+| Feedback | Formspree | Serverless form submission → email to Alex with section context |
+| Payment | Gumroad or Stripe (TBD) | Must support repeat payments (value is time-delayed, readers return over years) |
+| State persistence | localStorage | Session reading position, A/B/U history, LLM conversation |
+| Browser support | Modern only (Chrome/Firefox/Safari/Edge last 2 versions) | Three.js WebGL already excludes legacy browsers |
+| MVP scope | 5–6 sections, flat branching (one scaffold level per section) | Start lean; add depth based on U-spike data |
 
 ---
 
 ## Blockers
 
-None.
+None. The PRD is complete and implementation-ready.
 
 ---
 
 ## Exact next steps
 
-### Phase 2: Website / Book
+The PRD is the foundation. The next phase is to plan and then build. Four options — pick one or discuss which order makes sense:
 
-Alex wants to turn the GIFs into a "book" — a website that displays the GIFs alongside explainer text. He anticipates creating more explainer GIFs later.
+### Option A — Create Epics & Stories (start building path)
+**Skill:** `bmad-create-epics-and-stories` (or tell John "CE")
+**What it does:** Breaks the 43 FRs into epics and user stories with acceptance criteria. Output feeds directly into development.
+**When to choose:** If you want to start coding soon and are happy with the architecture being designed as you go.
 
-**Recommended next action:** Open a new context window and use a BMAD persona (suggest **Mary** the business analyst or **Winston** the architect) to plan the website structure:
-- What is the book's purpose and audience?
-- How many chapters/sections? What narrative arc?
-- Tech stack for the site (static HTML/CSS? Next.js? Something else?)
-- How do GIFs map to sections of the explainer text?
-- Will more GIFs be created in this same repo, or a separate one?
+### Option B — Check Implementation Readiness
+**Skill:** `bmad-check-implementation-readiness` (or tell John "IR")
+**What it does:** Validates the PRD has everything needed before architecture/UX work begins. Identifies gaps.
+**When to choose:** If you want confidence the PRD is solid before investing in architecture or UX design.
 
-The GIF source files live at: `/Users/alexanderlarge/claude/2026-03-30 - A B U 3D visual/`
-GitHub remote: `https://github.com/alex-is-learning/A-B-U-visuals`
+### Option C — Design Architecture First
+**Agent:** Winston (architect) — say "talk to Winston" or use `bmad-agent-architect`
+**What it does:** Designs the technical architecture — file structure, data flow, component design, LLM integration pattern, branching config schema.
+**When to choose:** If you want a clear technical blueprint before writing a line of code. Recommended given the LLM integration and branching config are novel enough to benefit from upfront design.
+
+### Option D — Design UX First
+**Agent:** Sally (UX designer) — say "talk to Sally" or use `bmad-agent-ux-designer`
+**What it does:** Designs the reading experience — how sections feel, how A/B/U buttons look and behave, LLM chat UI, payment prompt, mobile layout.
+**When to choose:** If you want to nail the reading experience design before implementation. The UX of the A/B/U buttons is load-bearing — it shapes whether readers actually use them.
+
+### Recommended order
+**B → C → A** or **C → A** (skip B if you trust the PRD):
+1. (Optional) IR check — 30 minutes, catches any gaps
+2. Winston for architecture — defines the file structure and config schema Alex will actually work with
+3. Epics & stories — now implementation is straightforward
+
+UX (Sally) can run **in parallel with or after architecture** — the reading experience design doesn't block the technical foundation.
+
+---
+
+## Key context for next session
+
+- Alex is sole developer/author, AI-assisted
+- Writing the 5–6 sections is the main time investment (not engineering)
+- Content pacing note from brainstorming: three timescales — fast (U binding), medium (A growth), slow (A→B maturation) — worth considering when ordering sections
+- Defender is ready to review and signal-boost once MVP is ready
+- ORI profit-sharing model in place
+- Payment validation is a 3–5 year signal — early low payments are not failure
+- The book is collaborative with Defender (Open Research Institute: openresearchinstitute.org)
+
+---
+
+## Files
+
+```
+/Users/alexanderlarge/claude/2026-03-30 - A B U 3D visual/
+├── HANDOVER.md                          ← this file
+├── A-frontier.html
+├── A-to-B.html
+├── U-book-and-person.html
+├── U-to-A.html
+├── U-rejected.html
+├── mal1-maladaptive-b-fires.html
+├── mal2-feedback-rejected.html
+├── mal3-feedback-integrated-equal.html
+├── mal4-feedback-integrated-dominant.html
+└── _bmad-output/
+    └── planning/
+        ├── prd.md                       ← GIF animations PRD (complete, Phase 1)
+        └── prd-website-book.md          ← Book website PRD (complete, Phase 2)
+```
