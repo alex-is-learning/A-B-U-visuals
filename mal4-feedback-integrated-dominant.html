@@ -55,6 +55,9 @@
     const SPRING_SETTLE = 300;
     const GIF_FPS  = 30;
 
+    // Person position — same as mal2/mal3
+    const PERSON_X = 210, PERSON_Y = 30, PERSON_Z = 0;
+
     // ─── Scene ────────────────────────────────────────────────────────────────
     const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     renderer.setSize(W, H);
@@ -80,6 +83,8 @@
     // ─── State ────────────────────────────────────────────────────────────────
     let simNodes = [], simEdges = [], nodes = [], edges = [], nodeById = new Map();
     let animating = false, gifCapturing = false, loopStarted = false;
+    let personMesh = null, personIcon = null;
+    let smokeParticles = [];
 
     // ─── Frustum clamp ───────────────────────────────────────────────────────
     function clampToView(pos) {
@@ -187,8 +192,71 @@
       line.material.dispose();
     }
 
+    // ─── Smoke helpers ────────────────────────────────────────────────────────
+    function tickSmoke(pos) {
+      const count = rnd() < 0.5 ? 1 : 2;
+      for (let i = 0; i < count; i++) {
+        const geo = new THREE.SphereGeometry(1.2 + rnd() * 0.8, 6, 4);
+        const mat = new THREE.MeshBasicMaterial({ color: 0x888888, transparent: true, opacity: 0.7 });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(
+          pos.x + (rnd() - 0.5) * 6,
+          pos.y + 2 + (rnd() - 0.5) * 2,
+          pos.z + (rnd() - 0.5) * 4
+        );
+        scene.add(mesh);
+        smokeParticles.push({ mesh, vx: (rnd() - 0.5) * 0.6, vy: 1.2 + rnd() * 1.0, life: 0, maxLife: 30 + Math.floor(rnd() * 15) });
+      }
+      for (let i = smokeParticles.length - 1; i >= 0; i--) {
+        const p = smokeParticles[i];
+        p.life++;
+        p.mesh.position.x += p.vx;
+        p.mesh.position.y += p.vy;
+        p.vy *= 0.96;
+        const t = p.life / p.maxLife;
+        p.mesh.material.opacity = 0.7 * (1 - t);
+        p.mesh.scale.setScalar(1 + t * 1.5);
+        if (p.life >= p.maxLife) {
+          scene.remove(p.mesh); p.mesh.geometry.dispose(); p.mesh.material.dispose();
+          smokeParticles.splice(i, 1);
+        }
+      }
+    }
+
+    function disposeSmoke() {
+      for (const p of smokeParticles) {
+        scene.remove(p.mesh); p.mesh.geometry.dispose(); p.mesh.material.dispose();
+      }
+      smokeParticles = [];
+    }
+
+    // ─── Icon sprite ──────────────────────────────────────────────────────────
+    function makeIconSprite(symbol) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 128; canvas.height = 128;
+      const ctx = canvas.getContext('2d');
+      ctx.font = '88px serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(symbol, 64, 64);
+      const tex = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 1 });
+      const sprite = new THREE.Sprite(mat);
+      sprite.scale.set(30, 30, 1);
+      return sprite;
+    }
+
     // ─── Build base graph ─────────────────────────────────────────────────────
     function buildBaseGraph() {
+      if (personMesh) {
+        scene.remove(personMesh); personMesh.geometry.dispose(); personMesh.material.dispose();
+        personMesh = null;
+      }
+      if (personIcon) {
+        scene.remove(personIcon); personIcon.material.map.dispose(); personIcon.material.dispose();
+        personIcon = null;
+      }
+      disposeSmoke();
       nodes.forEach(n => { scene.remove(n.mesh); n.mesh.geometry.dispose(); n.mesh.material.dispose(); });
       edges.forEach(e => disposeEdge(e.line));
       simNodes = []; simEdges = []; nodes = []; edges = []; nodeById = new Map();
@@ -240,6 +308,22 @@
         const line = makeEdgeLine(p1, p2, se.weight);
         edges.push({ si: se.si, ti: se.ti, weight: se.weight, line });
       });
+
+      // Person: red smouldering sphere + 👤 sprite — mal2 end-state, present from frame 1
+      const personPos = new THREE.Vector3(PERSON_X, PERSON_Y, PERSON_Z);
+      personMesh = new THREE.Mesh(
+        new THREE.SphereGeometry(5, 16, 12),
+        new THREE.MeshPhongMaterial({
+          color: 0xff0000, shininess: 30,
+          emissive: new THREE.Color(0.5, 0, 0), emissiveIntensity: 0.6
+        })
+      );
+      personMesh.position.copy(personPos);
+      scene.add(personMesh);
+
+      personIcon = makeIconSprite('👤');
+      personIcon.position.set(personPos.x, personPos.y - 18, personPos.z);
+      scene.add(personIcon);
     }
 
     // ─── Animation ───────────────────────────────────────────────────────────
@@ -251,18 +335,20 @@
 
       return new Promise(resolve => {
         const HOLD_INITIAL    = 15;
-        const POP_FRAMES      = 8;
+        const CHARGE_FRAMES   = 12;
         const APPROACH_FRAMES = 42;
-        const SNAP_FRAMES     = 8;
+        const SNAP_FRAMES     = 16;  // doubled
         const SNAP_SPRING     = 20;
-        const LERP_FRAMES     = 14;
-        const SIZE_FRAMES     = 14;
+        const LERP_FRAMES     = 28;  // doubled
+        const SIZE_FRAMES     = 28;  // doubled
         const MATURE_SPRING   = 55;
-        const MATURE_LERP     = 38;
-        const ORBIT_FRAMES    = 90;   // enough to show dominance emerge and settle
-        const SCALE_FRAMES    = 45;   // frames over which size shift happens
+        const MATURE_LERP     = 76;  // doubled
+        const ORBIT_FRAMES    = 90;
+        const SCALE_FRAMES    = 45;
         const ORBIT_SPEED     = 0.018;
         const MIN_ORBIT_R     = 22;
+
+        const personPos = new THREE.Vector3(PERSON_X, PERSON_Y, PERSON_Z);
 
         // Pick the outermost A node (same logic as mal3)
         const outerA = simNodes
@@ -272,8 +358,9 @@
         const targetAIdx = outerA.i;
         const targetAPos = nodes[targetAIdx].mesh.position;
 
-        const approachDir = targetAPos.clone().normalize();
-        const uStart   = clampToView(approachDir.clone().multiplyScalar(targetAPos.length() + 85));
+        // Signal travels FROM the person TO the outer A frontier
+        const approachDir = targetAPos.clone().sub(personPos).normalize();
+        const uStart   = personPos.clone();
         const uArrival = targetAPos.clone().sub(approachDir.clone().multiplyScalar(20));
 
         const uGeo = new THREE.SphereGeometry(RADIUS_A, 16, 12);
@@ -286,10 +373,11 @@
         uMesh.scale.set(0.01, 0.01, 0.01);
         scene.add(uMesh);
 
-        // ── Phase 0: initial hold ─────────────────────────────────────────────
+        // ── Phase 0: initial hold — smouldering person, network settled ───────
         function phase0() {
           let f = 0;
           function tick() {
+            tickSmoke(personPos);
             renderFrame(); if (onFrame) onFrame();
             if (++f < HOLD_INITIAL) requestAnimationFrame(tick);
             else phase1();
@@ -297,22 +385,27 @@
           requestAnimationFrame(tick);
         }
 
-        // ── Phase 1: pop in at screen edge ────────────────────────────────────
+        // ── Phase 1: charge — signal spawns at person and grows ───────────────
         function phase1() {
           let f = 0;
           function tick() {
             f++;
-            const t = f / POP_FRAMES;
+            const t = f / CHARGE_FRAMES;
             const s = t < 0.5 ? 4*t*t*t : 1 - ((-2*t+2)**3) / 2;
             uMesh.scale.set(s, s, s);
+            personMesh.material.emissiveIntensity = 0.6 + Math.sin(f * 1.5) * 0.5;
+            tickSmoke(personPos);
             renderFrame(); if (onFrame) onFrame();
-            if (f < POP_FRAMES) requestAnimationFrame(tick);
-            else phase2();
+            if (f < CHARGE_FRAMES) requestAnimationFrame(tick);
+            else {
+              personMesh.material.emissiveIntensity = 0.6;
+              phase2();
+            }
           }
           requestAnimationFrame(tick);
         }
 
-        // ── Phase 2: smooth approach to outer A frontier ──────────────────────
+        // ── Phase 2: smooth approach from person to outer A frontier ──────────
         function phase2() {
           let f = 0;
           function tick() {
@@ -321,6 +414,7 @@
             const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
             uMesh.position.lerpVectors(uStart, uArrival, ease);
             uMat.emissiveIntensity = 1.5 * (1 - t * 0.8);
+            tickSmoke(personPos);
             renderFrame(); if (onFrame) onFrame();
             if (f < APPROACH_FRAMES) requestAnimationFrame(tick);
             else phase3();
@@ -328,7 +422,7 @@
           requestAnimationFrame(tick);
         }
 
-        // ── Phase 3: snap in as new A node ────────────────────────────────────
+        // ── Phase 3: snap in as new A node (red) ─────────────────────────────
         function phase3() {
           uMat.color.setHex(COLOR_A);
           uMat.emissive.setRGB(1, 0.3, 0.2);
@@ -386,6 +480,7 @@
               const p2 = nodes[e.ti]?.mesh.position;
               if (p1 && p2) writeEdgeBuffer(e.line, p1, p2, e.weight);
             });
+            tickSmoke(personPos);
             renderFrame(); if (onFrame) onFrame();
             if (f < LERP_FRAMES) requestAnimationFrame(tick);
             else phase4(newIdx);
@@ -393,41 +488,8 @@
           requestAnimationFrame(tick);
         }
 
-        // ── Phase 4: colour snap A→B ──────────────────────────────────────────
+        // ── Phase 4: spring reorganise toward B cluster (still red) ──────────
         function phase4(newIdx) {
-          uMat.color.setHex(COLOR_B);
-          uMat.emissive.setRGB(0.3, 1, 0.5);
-          uMat.emissiveIntensity = 3.5;
-          let f = 0;
-          function tick() {
-            f++;
-            uMat.emissiveIntensity = 3.5 * (1 - f / SNAP_FRAMES);
-            renderFrame(); if (onFrame) onFrame();
-            if (f < SNAP_FRAMES) requestAnimationFrame(tick);
-            else { uMat.emissiveIntensity = 0; phase5(newIdx); }
-          }
-          requestAnimationFrame(tick);
-        }
-
-        // ── Phase 5: size lerp A → B ──────────────────────────────────────────
-        function phase5(newIdx) {
-          const endScale = RADIUS_B / RADIUS_A;
-          let f = 0;
-          function tick() {
-            f++;
-            const t = f / SIZE_FRAMES;
-            const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
-            const s = 1 + (endScale - 1) * ease;
-            uMesh.scale.set(s, s, s);
-            renderFrame(); if (onFrame) onFrame();
-            if (f < SIZE_FRAMES) requestAnimationFrame(tick);
-            else phase6(newIdx);
-          }
-          requestAnimationFrame(tick);
-        }
-
-        // ── Phase 6: spring reorganise ────────────────────────────────────────
-        function phase6(newIdx) {
           simNodes[newIdx].type = 'B';
 
           simEdges.forEach(se => {
@@ -488,8 +550,44 @@
               const p2 = nodes[e.ti]?.mesh.position;
               if (p1 && p2) writeEdgeBuffer(e.line, p1, p2, e.weight);
             });
+            tickSmoke(personPos);
             renderFrame(); if (onFrame) onFrame();
             if (f < MATURE_LERP) requestAnimationFrame(tick);
+            else phase5(newIdx);
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 5: colour snap → green (maturation, now near B cluster) ────
+        function phase5(newIdx) {
+          uMat.color.setHex(COLOR_B);
+          uMat.emissive.setRGB(0.3, 1, 0.5);
+          uMat.emissiveIntensity = 3.5;
+          let f = 0;
+          function tick() {
+            f++;
+            uMat.emissiveIntensity = 3.5 * (1 - f / SNAP_FRAMES);
+            tickSmoke(personPos);
+            renderFrame(); if (onFrame) onFrame();
+            if (f < SNAP_FRAMES) requestAnimationFrame(tick);
+            else { uMat.emissiveIntensity = 0; phase6(newIdx); }
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 6: size lerp A → B ──────────────────────────────────────────
+        function phase6(newIdx) {
+          const endScale = RADIUS_B / RADIUS_A;
+          let f = 0;
+          function tick() {
+            f++;
+            const t = f / SIZE_FRAMES;
+            const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+            const s = 1 + (endScale - 1) * ease;
+            uMesh.scale.set(s, s, s);
+            tickSmoke(personPos);
+            renderFrame(); if (onFrame) onFrame();
+            if (f < SIZE_FRAMES) requestAnimationFrame(tick);
             else phase7(newIdx);
           }
           requestAnimationFrame(tick);
@@ -579,6 +677,7 @@
               orbitZ
             );
             updateOrbitalEdges();
+            tickSmoke(personPos);
             renderFrame(); if (onFrame) onFrame();
             if (f < ORBIT_FRAMES) requestAnimationFrame(tick);
             else {
@@ -695,7 +794,10 @@
       loopStarted = true;
       (function loop() {
         requestAnimationFrame(loop);
-        if (!animating && !gifCapturing) renderFrame();
+        if (!animating && !gifCapturing) {
+          if (personMesh) tickSmoke(new THREE.Vector3(PERSON_X, PERSON_Y, PERSON_Z));
+          renderFrame();
+        }
       })();
     }
 
