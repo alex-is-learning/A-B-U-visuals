@@ -85,6 +85,7 @@
     let animating = false, gifCapturing = false, loopStarted = false;
     // Person objects persisted across animation so they're visible in hold frames
     let personMesh = null, personIcon = null;
+    let smokeParticles = [], smokeActive = false;
 
     // ─── Frustum clamp ───────────────────────────────────────────────────────
     function clampToView(pos) {
@@ -207,6 +208,7 @@
       nodes.forEach(n => { scene.remove(n.mesh); n.mesh.geometry.dispose(); n.mesh.material.dispose(); });
       edges.forEach(e => disposeEdge(e.line));
       simNodes = []; simEdges = []; nodes = []; edges = []; nodeById = new Map();
+      smokeActive = false; disposeSmoke();
 
       for (let i = 0; i < BASE_B; i++) {
         simNodes.push({ id: `B${i}`, type: 'B',
@@ -255,6 +257,22 @@
         const line = makeEdgeLine(p1, p2, se.weight);
         edges.push({ si: se.si, ti: se.ti, weight: se.weight, line });
       });
+
+      // Person: grey sphere + 👤 sprite — present from frame 1
+      const personPos = new THREE.Vector3(PERSON_X, PERSON_Y, PERSON_Z);
+      personMesh = new THREE.Mesh(
+        new THREE.SphereGeometry(5, 16, 12),
+        new THREE.MeshPhongMaterial({
+          color: 0xdddddd, shininess: 40,
+          emissive: new THREE.Color(0, 0, 0), emissiveIntensity: 0
+        })
+      );
+      personMesh.position.copy(personPos);
+      scene.add(personMesh);
+
+      personIcon = makePersonSprite();
+      personIcon.position.set(personPos.x, personPos.y - 18, personPos.z);
+      scene.add(personIcon);
     }
 
     // ─── Person sprite ────────────────────────────────────────────────────────
@@ -271,6 +289,48 @@
       const sprite = new THREE.Sprite(mat);
       sprite.scale.set(30, 30, 1);
       return sprite;
+    }
+
+    // ─── Smoke helpers ────────────────────────────────────────────────────────
+    // tickSmoke: spawn 1-2 new particles per frame + update + cull dead ones.
+    // Call every frame while person is smoking.
+    function tickSmoke(pos) {
+      const count = rnd() < 0.5 ? 1 : 2;
+      for (let i = 0; i < count; i++) {
+        const geo = new THREE.SphereGeometry(1.2 + rnd() * 0.8, 6, 4);
+        const mat = new THREE.MeshBasicMaterial({ color: 0x888888, transparent: true, opacity: 0.7 });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(
+          pos.x + (rnd() - 0.5) * 6,
+          pos.y + 2 + (rnd() - 0.5) * 2,
+          pos.z + (rnd() - 0.5) * 4
+        );
+        scene.add(mesh);
+        smokeParticles.push({ mesh, vx: (rnd() - 0.5) * 0.6, vy: 1.2 + rnd() * 1.0, life: 0, maxLife: 30 + Math.floor(rnd() * 15) });
+      }
+      for (let i = smokeParticles.length - 1; i >= 0; i--) {
+        const p = smokeParticles[i];
+        p.life++;
+        p.mesh.position.x += p.vx;
+        p.mesh.position.y += p.vy;
+        p.vy *= 0.96;
+        const t = p.life / p.maxLife;
+        p.mesh.material.opacity = 0.7 * (1 - t);
+        p.mesh.scale.setScalar(1 + t * 1.5);
+        if (p.life >= p.maxLife) {
+          scene.remove(p.mesh); p.mesh.geometry.dispose(); p.mesh.material.dispose();
+          smokeParticles.splice(i, 1);
+        }
+      }
+    }
+
+    function disposeSmoke() {
+      for (const p of smokeParticles) {
+        scene.remove(p.mesh);
+        p.mesh.geometry.dispose();
+        p.mesh.material.dispose();
+      }
+      smokeParticles = [];
     }
 
     // ─── Animation ───────────────────────────────────────────────────────────
@@ -290,37 +350,22 @@
         // Maladaptive B: use B0 (simNodes[0]) — behaves identically to all B nodes
         const malBPos = nodes[0].mesh.position;
 
-        // Person: grey sphere + 👤 sprite, positioned outside the A frontier
         const personPos = new THREE.Vector3(PERSON_X, PERSON_Y, PERSON_Z);
 
-        personMesh = new THREE.Mesh(
-          new THREE.SphereGeometry(5, 16, 12),
-          new THREE.MeshPhongMaterial({
-            color: 0xdddddd, shininess: 40,
-            emissive: new THREE.Color(0, 0, 0), emissiveIntensity: 0
-          })
-        );
-        personMesh.position.copy(personPos);
-        scene.add(personMesh);
-
-        personIcon = makePersonSprite();
-        personIcon.position.set(personPos.x, personPos.y - 18, personPos.z);
-        scene.add(personIcon);
-
-        // Pulse beam: straight green line from B0 to person (straight = distinct from bezier edges)
+        // Pulse beam: straight fire-red line from B0 to person (straight = distinct from bezier edges)
         const beamGeo = new THREE.BufferGeometry().setFromPoints([
           malBPos.clone(), personPos.clone()
         ]);
-        const beamMat = new THREE.LineBasicMaterial({ color: 0x44ff88, transparent: true, opacity: 0 });
+        const beamMat = new THREE.LineBasicMaterial({ color: 0xff2200, transparent: true, opacity: 0 });
         const beamLine = new THREE.Line(beamGeo, beamMat);
         beamLine.visible = false;
         scene.add(beamLine);
 
-        // Pulse dot: small bright green sphere that races along the beam
+        // Pulse dot: small bright orange sphere that races along the beam
         const dotGeo = new THREE.SphereGeometry(3, 8, 6);
         const dotMat = new THREE.MeshPhongMaterial({
-          color: 0x44ff88,
-          emissive: new THREE.Color(0.2, 1, 0.5), emissiveIntensity: 4.0,
+          color: 0xff6600,
+          emissive: new THREE.Color(1, 0.4, 0), emissiveIntensity: 4.0,
           transparent: true, opacity: 1
         });
         const dotMesh = new THREE.Mesh(dotGeo, dotMat);
@@ -368,6 +413,7 @@
 
         // ── Phase 2: impact — person flashes orange, dot splashes, beam fades ─
         function phase2() {
+          smokeActive = true;
           dotMesh.position.copy(personPos);
           personMesh.material.color.setHex(0xff6600);
           personMesh.material.emissive.setRGB(1, 0.3, 0);
@@ -382,6 +428,7 @@
             dotMat.opacity = 1 - t;
             // Beam fades out
             beamMat.opacity = 0.50 * (1 - t);
+            tickSmoke(personPos);
             renderFrame(); if (onFrame) onFrame();
             if (++f < IMPACT_FRAMES) requestAnimationFrame(tick);
             else {
@@ -392,15 +439,20 @@
           requestAnimationFrame(tick);
         }
 
-        // ── Phase 3: burn — emissive flicker on person ────────────────────────
+        // ── Phase 3: burn — emissive flicker, sphere lerps orange→red ─────────
         // Random flicker simulates fire/burn at the target. B node unchanged.
         function phase3() {
+          const orangeColor = new THREE.Color(0xff6600);
+          const redColor    = new THREE.Color(0xff0000);
           let f = 0;
           function tick() {
             const t = f / BURN_FRAMES;
             // Flicker: sine wave + noise, decaying amplitude
             const flicker = (2.2 + Math.sin(f * 2.1) * 0.9 + (rnd() - 0.5) * 1.2) * (1 - t * 0.4);
             personMesh.material.emissiveIntensity = Math.max(0.3, flicker);
+            // Sphere colour lerps from orange to red over the burn
+            personMesh.material.color.lerpColors(orangeColor, redColor, t);
+            tickSmoke(personPos);
             renderFrame(); if (onFrame) onFrame();
             if (++f < BURN_FRAMES) requestAnimationFrame(tick);
             else phase4();
@@ -408,11 +460,14 @@
           requestAnimationFrame(tick);
         }
 
-        // ── Phase 4: smoulder hold — person glows faintly, network unchanged ─
+        // ── Phase 4: smoulder hold — person smokes faintly red, network unchanged ─
         function phase4() {
+          personMesh.material.color.setHex(0xff0000);
+          personMesh.material.emissive.setRGB(0.5, 0, 0);
           personMesh.material.emissiveIntensity = 0.6;
           let f = 0;
           function tick() {
+            tickSmoke(personPos);
             renderFrame(); if (onFrame) onFrame();
             if (++f < HOLD_END) requestAnimationFrame(tick);
             else {
@@ -530,7 +585,10 @@
       loopStarted = true;
       (function loop() {
         requestAnimationFrame(loop);
-        if (!animating && !gifCapturing) renderFrame();
+        if (!animating && !gifCapturing) {
+          if (personMesh && smokeActive) tickSmoke(new THREE.Vector3(PERSON_X, PERSON_Y, PERSON_Z));
+          renderFrame();
+        }
       })();
     }
 

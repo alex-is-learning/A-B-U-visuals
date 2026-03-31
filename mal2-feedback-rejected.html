@@ -90,6 +90,8 @@
     // ─── State ────────────────────────────────────────────────────────────────
     let simNodes = [], simEdges = [], nodes = [], edges = [], nodeById = new Map();
     let animating = false, gifCapturing = false, loopStarted = false;
+    let personMesh = null, personIcon = null;
+    let smokeParticles = [];
 
     // ─── Frustum clamp ───────────────────────────────────────────────────────
     function clampToView(pos) {
@@ -199,6 +201,14 @@
 
     // ─── Build base graph ─────────────────────────────────────────────────────
     function buildBaseGraph() {
+      if (personMesh) {
+        scene.remove(personMesh); personMesh.geometry.dispose(); personMesh.material.dispose();
+        personMesh = null;
+      }
+      if (personIcon) {
+        scene.remove(personIcon); personIcon.material.map.dispose(); personIcon.material.dispose();
+        personIcon = null;
+      }
       nodes.forEach(n => { scene.remove(n.mesh); n.mesh.geometry.dispose(); n.mesh.material.dispose(); });
       edges.forEach(e => disposeEdge(e.line));
       simNodes = []; simEdges = []; nodes = []; edges = []; nodeById = new Map();
@@ -250,6 +260,60 @@
         const line = makeEdgeLine(p1, p2, se.weight);
         edges.push({ si: se.si, ti: se.ti, weight: se.weight, line });
       });
+
+      // Person: red sphere + 👤 sprite — present from frame 1, in mal1 end-state
+      const personPos = new THREE.Vector3(PERSON_X, PERSON_Y, PERSON_Z);
+      personMesh = new THREE.Mesh(
+        new THREE.SphereGeometry(5, 16, 12),
+        new THREE.MeshPhongMaterial({
+          color: 0xff0000, shininess: 30,
+          emissive: new THREE.Color(0.5, 0, 0), emissiveIntensity: 0.6
+        })
+      );
+      personMesh.position.copy(personPos);
+      scene.add(personMesh);
+
+      personIcon = makeIconSprite('👤');
+      personIcon.position.set(personPos.x, personPos.y - 18, personPos.z);
+      scene.add(personIcon);
+    }
+
+    // ─── Smoke helpers ────────────────────────────────────────────────────────
+    function tickSmoke(pos) {
+      const count = rnd() < 0.5 ? 1 : 2;
+      for (let i = 0; i < count; i++) {
+        const geo = new THREE.SphereGeometry(1.2 + rnd() * 0.8, 6, 4);
+        const mat = new THREE.MeshBasicMaterial({ color: 0x888888, transparent: true, opacity: 0.7 });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(
+          pos.x + (rnd() - 0.5) * 6,
+          pos.y + 2 + (rnd() - 0.5) * 2,
+          pos.z + (rnd() - 0.5) * 4
+        );
+        scene.add(mesh);
+        smokeParticles.push({ mesh, vx: (rnd() - 0.5) * 0.6, vy: 1.2 + rnd() * 1.0, life: 0, maxLife: 30 + Math.floor(rnd() * 15) });
+      }
+      for (let i = smokeParticles.length - 1; i >= 0; i--) {
+        const p = smokeParticles[i];
+        p.life++;
+        p.mesh.position.x += p.vx;
+        p.mesh.position.y += p.vy;
+        p.vy *= 0.96;
+        const t = p.life / p.maxLife;
+        p.mesh.material.opacity = 0.7 * (1 - t);
+        p.mesh.scale.setScalar(1 + t * 1.5);
+        if (p.life >= p.maxLife) {
+          scene.remove(p.mesh); p.mesh.geometry.dispose(); p.mesh.material.dispose();
+          smokeParticles.splice(i, 1);
+        }
+      }
+    }
+
+    function disposeSmoke() {
+      for (const p of smokeParticles) {
+        scene.remove(p.mesh); p.mesh.geometry.dispose(); p.mesh.material.dispose();
+      }
+      smokeParticles = [];
     }
 
     // ─── Icon sprite ──────────────────────────────────────────────────────────
@@ -283,20 +347,6 @@
         const HOLD_END        = 25;  // B cluster unchanged, signal gone
 
         const personPos = new THREE.Vector3(PERSON_X, PERSON_Y, PERSON_Z);
-
-        // Smouldering person: grey sphere with residual orange glow, 👤 icon
-        const personGeo = new THREE.SphereGeometry(5, 16, 12);
-        const personMat = new THREE.MeshPhongMaterial({
-          color: 0xff6600, shininess: 30,
-          emissive: new THREE.Color(1, 0.3, 0), emissiveIntensity: 0.6
-        });
-        const personMesh = new THREE.Mesh(personGeo, personMat);
-        personMesh.position.copy(personPos);
-        scene.add(personMesh);
-
-        const personIcon = makeIconSprite('👤');
-        personIcon.position.set(personPos.x, personPos.y - 18, personPos.z);
-        scene.add(personIcon);
 
         // The feedback signal: purple U-style sphere + icon, aimed directly at B cluster
         // Charged approach path: straight inward at the B cluster (not the A frontier)
@@ -337,6 +387,7 @@
         function phase0() {
           let f = 0;
           function tick() {
+            tickSmoke(personPos);
             renderFrame(); if (onFrame) onFrame();
             if (++f < HOLD_INITIAL) requestAnimationFrame(tick);
             else phase1();
@@ -355,11 +406,12 @@
             const s = t < 0.5 ? 4*t*t*t : 1 - ((-2*t+2)**3) / 2;
             uMesh.scale.set(s, s, s);
             // Pulse person's glow — it's emitting a signal
-            personMat.emissiveIntensity = 0.6 + Math.sin(f * 1.5) * 0.4;
+            personMesh.material.emissiveIntensity = 0.6 + Math.sin(f * 1.5) * 0.4;
+            tickSmoke(personPos);
             renderFrame(); if (onFrame) onFrame();
             if (f < CHARGE_FRAMES) requestAnimationFrame(tick);
             else {
-              personMat.emissiveIntensity = 0.5;
+              personMesh.material.emissiveIntensity = 0.5;
               phase2();
             }
           }
@@ -378,6 +430,7 @@
             uMesh.position.lerpVectors(uStart, uArrivalPos, ease);
             // High emissive intensity throughout — charged and direct
             uMesh.material.emissiveIntensity = 2.5 * (1 - t * 0.3);
+            tickSmoke(personPos);
             renderFrame(); if (onFrame) onFrame();
             if (f < APPROACH_FRAMES) requestAnimationFrame(tick);
             else {
@@ -429,6 +482,7 @@
             flickerLine.material.opacity = 0.05 + Math.random() * 0.20;
             writeEdgeBuffer(flickerLine, uMesh.position, nodes[closestIdx].mesh.position, 0.15);
 
+            tickSmoke(personPos);
             renderFrame(); if (onFrame) onFrame();
             if (wobbleFrame < WOBBLE_FRAMES) {
               requestAnimationFrame(wobbleStep);
@@ -459,6 +513,7 @@
               fadeStartPos.z + driftDir.z * 30 * t
             );
 
+            tickSmoke(personPos);
             renderFrame(); if (onFrame) onFrame();
             if (f < FADE_FRAMES) {
               requestAnimationFrame(tick);
@@ -474,11 +529,10 @@
         function phase5() {
           let f = 0;
           function tick() {
+            tickSmoke(personPos);
             renderFrame(); if (onFrame) onFrame();
             if (++f < HOLD_END) requestAnimationFrame(tick);
             else {
-              scene.remove(personMesh); personGeo.dispose(); personMat.dispose();
-              scene.remove(personIcon); personIcon.material.map.dispose(); personIcon.material.dispose();
               animating = false;
               exportBtn.disabled = false;
               setStatus('Done.');
@@ -592,7 +646,10 @@
       loopStarted = true;
       (function loop() {
         requestAnimationFrame(loop);
-        if (!animating && !gifCapturing) renderFrame();
+        if (!animating && !gifCapturing) {
+          if (personMesh) tickSmoke(new THREE.Vector3(PERSON_X, PERSON_Y, PERSON_Z));
+          renderFrame();
+        }
       })();
     }
 
