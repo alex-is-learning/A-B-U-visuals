@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>A/B/U 3D Network — mal2: Feedback Rejected</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; }
+    canvas { display: block; }
+    #ui {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: flex-end;
+    }
+    button {
+      padding: 8px 16px;
+      background: #fff;
+      color: #000;
+      border: none;
+      cursor: pointer;
+      font-size: 14px;
+      font-family: monospace;
+    }
+    button:disabled { opacity: 0.4; cursor: default; }
+    #status { color: #aaa; font-size: 12px; font-family: monospace; }
+    #error  { color: #ff4444; font-size: 12px; font-family: monospace; display: none; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <button id="exportBtn">Download GIF</button>
+    <div id="status">Initialising…</div>
+    <div id="error"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"
+          onerror="document.getElementById('error').textContent='Failed to load Three.js'; document.getElementById('error').style.display='block'"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.js"
+          onerror="document.getElementById('error').textContent='Failed to load gif.js'; document.getElementById('error').style.display='block'"></script>
+
+  <script>
+    // ─── Constants ────────────────────────────────────────────────────────────
+    const W = 800, H = 600;
+    const COLOR_B  = 0x44ff88;
+    const COLOR_A  = 0xff4444;
+    const COLOR_U  = 0xaa44ff;
+    const RADIUS_B = 6;
+    const RADIUS_A = 4;
+    const U_RADIUS = 4;
+    const BASE_B   = 5;
+    const BASE_A   = 15;
+    const SPRING_SETTLE = 300;
+    const GIF_FPS  = 30;
+
+    // Person starts right side, outside A frontier (same as mal1)
+    const PERSON_X = 210, PERSON_Y = 30, PERSON_Z = 0;
+
+    // Rejection wobble parameters (matching U-rejected.html)
+    const WOBBLE_CYCLES          = 5;
+    const WOBBLE_FRAME_PERIOD    = 12;
+    const WOBBLE_AMPLITUDE_START = 14;
+    const FADE_FRAMES            = 30;
+
+    // ─── Scene ────────────────────────────────────────────────────────────────
+    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    renderer.setSize(W, H);
+    renderer.setClearColor(0x000000, 1);
+    document.body.appendChild(renderer.domElement);
+
+    const scene  = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, W / H, 1, 2000);
+    camera.position.set(0, 0, 360);
+    camera.lookAt(0, 0, 0);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const pt = new THREE.PointLight(0xffffff, 1.2, 500);
+    pt.position.set(100, 100, 100);
+    scene.add(pt);
+
+    // ─── UI ───────────────────────────────────────────────────────────────────
+    const statusEl  = document.getElementById('status');
+    const errorEl   = document.getElementById('error');
+    const exportBtn = document.getElementById('exportBtn');
+    function setStatus(m) { statusEl.textContent = m; }
+    function setError(m)  { errorEl.textContent = m; errorEl.style.display = m ? 'block' : 'none'; }
+
+    // ─── State ────────────────────────────────────────────────────────────────
+    let simNodes = [], simEdges = [], nodes = [], edges = [], nodeById = new Map();
+    let animating = false, gifCapturing = false, loopStarted = false;
+
+    // ─── Frustum clamp ───────────────────────────────────────────────────────
+    function clampToView(pos) {
+      const MARGIN = 0.75;
+      const ndc = pos.clone().project(camera);
+      if (Math.abs(ndc.x) <= MARGIN && Math.abs(ndc.y) <= MARGIN) return pos;
+      const dir = pos.clone().normalize();
+      let lo = 0, hi = pos.length();
+      for (let i = 0; i < 24; i++) {
+        const mid = (lo + hi) / 2;
+        const t   = dir.clone().multiplyScalar(mid).project(camera);
+        if (Math.abs(t.x) <= MARGIN && Math.abs(t.y) <= MARGIN) lo = mid;
+        else hi = mid;
+      }
+      return dir.multiplyScalar(lo * 0.97);
+    }
+
+    // ─── Spring Layout ────────────────────────────────────────────────────────
+    function runSpring(ns, es, iters) {
+      const KR = 6000, KS = 0.04, KCB = 0.06, KCA = 0.006, DAMP = 0.85;
+      for (let iter = 0; iter < iters; iter++) {
+        const cool = Math.max(0.01, 1 - iter / (iters + 1));
+        for (let i = 0; i < ns.length; i++) {
+          for (let j = i + 1; j < ns.length; j++) {
+            const a = ns[i], b = ns[j];
+            const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+            const d2 = dx*dx + dy*dy + dz*dz + 1;
+            const d  = Math.sqrt(d2);
+            const f  = KR / d2;
+            const fx = f * dx / d, fy = f * dy / d, fz = f * dz / d;
+            a.vx -= fx; a.vy -= fy; a.vz -= fz;
+            b.vx += fx; b.vy += fy; b.vz += fz;
+          }
+        }
+        for (const e of es) {
+          const a = ns[e.si], b = ns[e.ti];
+          const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+          const d  = Math.sqrt(dx*dx + dy*dy + dz*dz) + 0.01;
+          const target = e.weight > 0.6 ? 22 : 42;
+          const f  = KS * (d - target);
+          const fx = f * dx / d, fy = f * dy / d, fz = f * dz / d;
+          a.vx += fx; a.vy += fy; a.vz += fz;
+          b.vx -= fx; b.vy -= fy; b.vz -= fz;
+        }
+        for (const n of ns) {
+          const k = n.type === 'B' ? KCB : KCA;
+          n.vx -= n.x * k; n.vy -= n.y * k; n.vz -= n.z * k;
+        }
+        for (const n of ns) {
+          n.vx *= DAMP; n.vy *= DAMP; n.vz *= DAMP;
+          n.x  += n.vx * cool;
+          n.y  += n.vy * cool;
+          n.z  += n.vz * cool;
+        }
+      }
+    }
+
+    // ─── Edge helpers ─────────────────────────────────────────────────────────
+    function computeCurvePoints(p1, p2, weight) {
+      const mid = new THREE.Vector3(
+        (p1.x + p2.x) / 2, (p1.y + p2.y) / 2, (p1.z + p2.z) / 2
+      );
+      const dx = p2.x - p1.x, dy = p2.y - p1.y, dz = p2.z - p1.z;
+      const lenXY = Math.sqrt(dx*dx + dy*dy);
+      const offset = 12 * weight;
+      if (lenXY > 0.5) {
+        mid.x += (-dy / lenXY) * offset;
+        mid.y += ( dx / lenXY) * offset;
+      } else {
+        const lenXZ = Math.sqrt(dx*dx + dz*dz) || 1;
+        mid.x += (-dz / lenXZ) * offset;
+        mid.z += ( dx / lenXZ) * offset;
+      }
+      return new THREE.QuadraticBezierCurve3(p1.clone(), mid, p2.clone()).getPoints(20);
+    }
+
+    function makeEdgeLine(p1, p2, weight) {
+      const buf = new Float32Array(21 * 3);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(buf, 3));
+      const mat = new THREE.LineBasicMaterial({
+        color: 0xffffff, transparent: true,
+        opacity: Math.min(1, 0.15 + weight * 0.55)
+      });
+      const line = new THREE.Line(geo, mat);
+      writeEdgeBuffer(line, p1, p2, weight);
+      scene.add(line);
+      return line;
+    }
+
+    function writeEdgeBuffer(line, p1, p2, weight) {
+      const pts = computeCurvePoints(p1, p2, weight);
+      const attr = line.geometry.attributes.position;
+      for (let i = 0; i < pts.length; i++) {
+        attr.array[i*3]   = pts[i].x;
+        attr.array[i*3+1] = pts[i].y;
+        attr.array[i*3+2] = pts[i].z;
+      }
+      attr.needsUpdate = true;
+    }
+
+    function disposeEdge(line) {
+      scene.remove(line);
+      line.geometry.dispose();
+      line.material.dispose();
+    }
+
+    // ─── Build base graph ─────────────────────────────────────────────────────
+    function buildBaseGraph() {
+      nodes.forEach(n => { scene.remove(n.mesh); n.mesh.geometry.dispose(); n.mesh.material.dispose(); });
+      edges.forEach(e => disposeEdge(e.line));
+      simNodes = []; simEdges = []; nodes = []; edges = []; nodeById = new Map();
+
+      for (let i = 0; i < BASE_B; i++) {
+        simNodes.push({ id: `B${i}`, type: 'B',
+          x: (rnd()-0.5)*20, y: (rnd()-0.5)*20, z: (rnd()-0.5)*20, vx:0, vy:0, vz:0 });
+      }
+      for (let i = 0; i < BASE_A; i++) {
+        const ang  = (i / BASE_A) * Math.PI * 2;
+        const ring = Math.floor(i / 5);
+        const r    = 35 + ring * 28;
+        simNodes.push({ id: `A${i}`, type: 'A',
+          x: Math.cos(ang)*r + (rnd()-0.5)*12,
+          y: Math.sin(ang)*r + (rnd()-0.5)*12,
+          z: (rnd()-0.5)*35, vx:0, vy:0, vz:0 });
+      }
+
+      for (let i = 0; i < BASE_B; i++)
+        for (let j = i+1; j < BASE_B; j++)
+          simEdges.push({ si: i, ti: j, weight: 0.7 + rnd()*0.3 });
+      for (let i = 0; i < BASE_B; i++) {
+        shuffle([...Array(BASE_A).keys()]).slice(0, 3).forEach(j => {
+          simEdges.push({ si: i, ti: BASE_B + j, weight: 0.3 + rnd()*0.4 });
+        });
+      }
+      for (let i = 0; i < BASE_A; i++) {
+        simEdges.push({ si: BASE_B+i, ti: BASE_B+((i+1)%BASE_A), weight: 0.2+rnd()*0.3 });
+        if (i+5 < BASE_A)
+          simEdges.push({ si: BASE_B+i, ti: BASE_B+i+5, weight: 0.15+rnd()*0.2 });
+      }
+
+      runSpring(simNodes, simEdges, SPRING_SETTLE);
+
+      simNodes.forEach(sn => {
+        const geo = new THREE.SphereGeometry(sn.type==='B' ? RADIUS_B : RADIUS_A, 16, 12);
+        const mat = new THREE.MeshPhongMaterial({ color: sn.type==='B' ? COLOR_B : COLOR_A, shininess: 60 });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(sn.x, sn.y, sn.z);
+        scene.add(mesh);
+        const node = { id: sn.id, mesh };
+        nodes.push(node);
+        nodeById.set(sn.id, node);
+      });
+
+      simEdges.forEach(se => {
+        const p1 = nodes[se.si].mesh.position;
+        const p2 = nodes[se.ti].mesh.position;
+        const line = makeEdgeLine(p1, p2, se.weight);
+        edges.push({ si: se.si, ti: se.ti, weight: se.weight, line });
+      });
+    }
+
+    // ─── Icon sprite ──────────────────────────────────────────────────────────
+    function makeIconSprite(symbol) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 128; canvas.height = 128;
+      const ctx = canvas.getContext('2d');
+      ctx.font = '88px serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(symbol, 64, 64);
+      const tex = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 1 });
+      const sprite = new THREE.Sprite(mat);
+      sprite.scale.set(30, 30, 1);
+      return sprite;
+    }
+
+    // ─── Animation ───────────────────────────────────────────────────────────
+    function runAnimation(onFrame) {
+      if (animating) return Promise.resolve();
+      animating = true;
+      exportBtn.disabled = true;
+      setStatus('Animating…');
+
+      return new Promise(resolve => {
+        const HOLD_INITIAL    = 20;  // show burnt person, network settled
+        const CHARGE_FRAMES   = 12;  // signal charges up at person (pulse/grow)
+        const APPROACH_FRAMES = 45;  // signal travels toward B cluster
+        const WOBBLE_FRAMES   = WOBBLE_CYCLES * WOBBLE_FRAME_PERIOD;
+        const HOLD_END        = 25;  // B cluster unchanged, signal gone
+
+        const personPos = new THREE.Vector3(PERSON_X, PERSON_Y, PERSON_Z);
+
+        // Smouldering person: grey sphere with residual orange glow, 👤 icon
+        const personGeo = new THREE.SphereGeometry(5, 16, 12);
+        const personMat = new THREE.MeshPhongMaterial({
+          color: 0xff6600, shininess: 30,
+          emissive: new THREE.Color(1, 0.3, 0), emissiveIntensity: 0.6
+        });
+        const personMesh = new THREE.Mesh(personGeo, personMat);
+        personMesh.position.copy(personPos);
+        scene.add(personMesh);
+
+        const personIcon = makeIconSprite('👤');
+        personIcon.position.set(personPos.x, personPos.y - 18, personPos.z);
+        scene.add(personIcon);
+
+        // The feedback signal: purple U-style sphere + icon, aimed directly at B cluster
+        // Charged approach path: straight inward at the B cluster (not the A frontier)
+        // The B cluster centre is near origin (0,0,0) after spring settle
+        const bCentrePos = new THREE.Vector3(0, 0, 0);
+
+        // Signal starts AT the person, charges, then travels inward to rejection point
+        const uStart   = personPos.clone();
+        // Rejection point: just inside the A frontier, aimed at B cluster
+        // Approach direction = from person toward B centre
+        const approachDir = bCentrePos.clone().sub(personPos).normalize();
+        // Arrival point: halfway between A frontier (~63 units from centre) and B cluster
+        // Person is at ~214 units from centre. Arrival ~40 units from centre.
+        const uArrival = approachDir.clone().multiplyScalar(40).negate().add(bCentrePos);
+        // Actually: approach direction is personPos → bCentrePos, so arrival is along that path
+        // Let's set arrival at ~45 world units from centre in the approach direction
+        const dist = personPos.length();
+        const arrivalDist = 45;
+        const uArrivalPos = personPos.clone().add(
+          approachDir.clone().multiplyScalar(dist - arrivalDist)
+        );
+
+        const uGeo = new THREE.SphereGeometry(U_RADIUS, 16, 12);
+        const uMat = new THREE.MeshPhongMaterial({
+          color: COLOR_U, shininess: 80, transparent: true, opacity: 0,
+          emissive: new THREE.Color(0.4, 0.1, 0.8), emissiveIntensity: 2.5
+        });
+        const uMesh = new THREE.Mesh(uGeo, uMat);
+        uMesh.position.copy(uStart);
+        uMesh.scale.set(0.01, 0.01, 0.01);
+        scene.add(uMesh);
+
+        function syncIcon() {
+          personIcon.position.set(personMesh.position.x, personMesh.position.y - 18, personMesh.position.z);
+        }
+
+        // ── Phase 0: initial hold — smouldering person, network normal ─────────
+        function phase0() {
+          let f = 0;
+          function tick() {
+            renderFrame(); if (onFrame) onFrame();
+            if (++f < HOLD_INITIAL) requestAnimationFrame(tick);
+            else phase1();
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 1: charge — signal spawns at person and grows ───────────────
+        // Charged, direct: signal grows with high emissive urgency at person location
+        function phase1() {
+          uMat.opacity = 1;
+          let f = 0;
+          function tick() {
+            f++;
+            const t = f / CHARGE_FRAMES;
+            const s = t < 0.5 ? 4*t*t*t : 1 - ((-2*t+2)**3) / 2;
+            uMesh.scale.set(s, s, s);
+            // Pulse person's glow — it's emitting a signal
+            personMat.emissiveIntensity = 0.6 + Math.sin(f * 1.5) * 0.4;
+            renderFrame(); if (onFrame) onFrame();
+            if (f < CHARGE_FRAMES) requestAnimationFrame(tick);
+            else {
+              personMat.emissiveIntensity = 0.5;
+              phase2();
+            }
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 2: charged approach — signal flies directly at B cluster ────
+        // Straight, fast, aimed at the heart of the network — conveys urgency/directness
+        function phase2() {
+          let f = 0;
+          function tick() {
+            f++;
+            const t    = f / APPROACH_FRAMES;
+            // Ease-in (accelerating) to convey charged urgency
+            const ease = t * t;
+            uMesh.position.lerpVectors(uStart, uArrivalPos, ease);
+            // High emissive intensity throughout — charged and direct
+            uMesh.material.emissiveIntensity = 2.5 * (1 - t * 0.3);
+            renderFrame(); if (onFrame) onFrame();
+            if (f < APPROACH_FRAMES) requestAnimationFrame(tick);
+            else {
+              // Brief hold at arrival before wobble
+              if (onFrame) { for (let i = 0; i < 6; i++) onFrame(); startWobble(); }
+              else setTimeout(startWobble, 200);
+            }
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 3: rejection wobble — U-rejection mechanic ─────────────────
+        // Identical to U-rejected.html: wobble perpendicular to approach axis,
+        // flicker edge, then fade. B cluster entirely unchanged.
+        function startWobble() {
+          // Find closest A or B node to rejection arrival point for flicker target
+          let closestIdx = BASE_B; // default to first A
+          let closestDist = Infinity;
+          simNodes.forEach((sn, i) => {
+            const dx = sn.x - uArrivalPos.x, dy = sn.y - uArrivalPos.y, dz = sn.z - uArrivalPos.z;
+            const d = dx*dx + dy*dy + dz*dz;
+            if (d < closestDist) { closestDist = d; closestIdx = i; }
+          });
+
+          const flickerLine = makeEdgeLine(
+            uMesh.position,
+            nodes[closestIdx].mesh.position,
+            0.15
+          );
+
+          const arrivalPos = uMesh.position.clone();
+          // Wobble axis: perpendicular to approach direction in XY plane
+          const wobbleAxis = new THREE.Vector3(
+            -approachDir.y, approachDir.x, 0
+          ).normalize();
+
+          let wobbleFrame = 0;
+          function wobbleStep() {
+            wobbleFrame++;
+            const phase     = (wobbleFrame / WOBBLE_FRAME_PERIOD) * Math.PI * 2;
+            const amplitude = WOBBLE_AMPLITUDE_START * (1 - (wobbleFrame / WOBBLE_FRAMES) * 0.3);
+
+            uMesh.position.set(
+              arrivalPos.x + wobbleAxis.x * Math.sin(phase) * amplitude,
+              arrivalPos.y + wobbleAxis.y * Math.sin(phase) * amplitude,
+              arrivalPos.z
+            );
+
+            flickerLine.material.opacity = 0.05 + Math.random() * 0.20;
+            writeEdgeBuffer(flickerLine, uMesh.position, nodes[closestIdx].mesh.position, 0.15);
+
+            renderFrame(); if (onFrame) onFrame();
+            if (wobbleFrame < WOBBLE_FRAMES) {
+              requestAnimationFrame(wobbleStep);
+            } else {
+              startFade(flickerLine);
+            }
+          }
+          requestAnimationFrame(wobbleStep);
+        }
+
+        // ── Phase 4: fade — signal dissipates, B unchanged ───────────────────
+        function startFade(flickerLine) {
+          disposeEdge(flickerLine);
+
+          const fadeStartPos = uMesh.position.clone();
+          // Drift back outward — rejected
+          const driftDir = approachDir.clone().negate();
+
+          let f = 0;
+          function tick() {
+            f++;
+            const t = f / FADE_FRAMES;
+            uMesh.material.opacity = Math.max(0, 1 - t);
+
+            uMesh.position.set(
+              fadeStartPos.x + driftDir.x * 30 * t,
+              fadeStartPos.y + driftDir.y * 30 * t,
+              fadeStartPos.z + driftDir.z * 30 * t
+            );
+
+            renderFrame(); if (onFrame) onFrame();
+            if (f < FADE_FRAMES) {
+              requestAnimationFrame(tick);
+            } else {
+              scene.remove(uMesh); uGeo.dispose(); uMat.dispose();
+              phase5();
+            }
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 5: hold end — B cluster completely unchanged ────────────────
+        function phase5() {
+          let f = 0;
+          function tick() {
+            renderFrame(); if (onFrame) onFrame();
+            if (++f < HOLD_END) requestAnimationFrame(tick);
+            else {
+              scene.remove(personMesh); personGeo.dispose(); personMat.dispose();
+              scene.remove(personIcon); personIcon.material.map.dispose(); personIcon.material.dispose();
+              animating = false;
+              exportBtn.disabled = false;
+              setStatus('Done.');
+              resolve();
+            }
+          }
+          requestAnimationFrame(tick);
+        }
+
+        renderFrame(); if (onFrame) onFrame();
+        phase0();
+      });
+    }
+
+    // ─── GIF Export ───────────────────────────────────────────────────────────
+    async function createGifEncoder() {
+      let workerSrc;
+      try {
+        const resp = await fetch('https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js');
+        if (!resp.ok) throw new Error('fetch failed');
+        const text = await resp.text();
+        workerSrc = URL.createObjectURL(new Blob([text], { type: 'application/javascript' }));
+      } catch (_) {
+        workerSrc = 'https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js';
+      }
+      return new GIF({ workers: 2, quality: 8, width: W, height: H, workerScript: workerSrc });
+    }
+
+    async function exportGif() {
+      if (gifCapturing || animating) return;
+      gifCapturing = true;
+      exportBtn.disabled = true;
+      setStatus('Preparing GIF encoder…');
+      setError('');
+
+      let gif;
+      try {
+        gif = await createGifEncoder();
+      } catch (e) {
+        setError('Export failed: could not create GIF encoder.');
+        gifCapturing = false;
+        exportBtn.disabled = false;
+        return;
+      }
+
+      const delay = Math.round(1000 / GIF_FPS);
+      function captureFrame() {
+        gif.addFrame(renderer.domElement, { copy: true, delay });
+      }
+
+      buildBaseGraph();
+      renderFrame();
+      setStatus('Capturing animation…');
+
+      await runAnimation(captureFrame);
+
+      for (let i = 0; i < 30; i++) captureFrame();
+
+      gif.on('finished', blob => {
+        const url = URL.createObjectURL(blob);
+        const a   = document.createElement('a');
+        a.href     = url;
+        a.download = 'mal2-feedback-rejected.gif';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 200);
+        gifCapturing = false;
+        exportBtn.disabled = false;
+        setStatus('GIF downloaded.');
+      });
+
+      gif.on('error', err => {
+        setError('Export failed: ' + (err?.message ?? String(err)));
+        gifCapturing = false;
+        exportBtn.disabled = false;
+      });
+
+      setTimeout(() => {
+        if (gifCapturing) {
+          setError('Export timed out. Try again.');
+          gifCapturing = false;
+          exportBtn.disabled = false;
+        }
+      }, 90000);
+
+      setStatus('Rendering GIF (this takes ~20–30s)…');
+      gif.render();
+    }
+
+    // ─── Utility ─────────────────────────────────────────────────────────────
+    function rnd() { return Math.random(); }
+    function shuffle(arr) {
+      for (let i = arr.length-1; i > 0; i--) {
+        const j = Math.floor(rnd()*(i+1)); [arr[i],arr[j]] = [arr[j],arr[i]];
+      }
+      return arr;
+    }
+
+    // ─── Rotation & render ────────────────────────────────────────────────────
+    function renderFrame() {
+      const t = performance.now();
+      scene.rotation.y = t * 0.00015;
+      scene.rotation.x = Math.sin(t * 0.0003) * 0.10;
+      renderer.render(scene, camera);
+    }
+
+    // ─── Render loop ─────────────────────────────────────────────────────────
+    function startRenderLoop() {
+      if (loopStarted) return;
+      loopStarted = true;
+      (function loop() {
+        requestAnimationFrame(loop);
+        if (!animating && !gifCapturing) renderFrame();
+      })();
+    }
+
+    // ─── Init ─────────────────────────────────────────────────────────────────
+    exportBtn.addEventListener('click', exportGif);
+
+    try {
+      buildBaseGraph();
+      renderFrame();
+      setStatus('Starting animation…');
+      startRenderLoop();
+      setTimeout(() => runAnimation(null), 600);
+    } catch (e) {
+      setError('Init error: ' + e.message);
+      console.error(e);
+    }
+  </script>
+</body>
+</html>

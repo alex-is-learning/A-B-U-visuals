@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>A/B/U 3D Network — mal3: Feedback Integrated (Equal)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; }
+    canvas { display: block; }
+    #ui {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: flex-end;
+    }
+    button {
+      padding: 8px 16px;
+      background: #fff;
+      color: #000;
+      border: none;
+      cursor: pointer;
+      font-size: 14px;
+      font-family: monospace;
+    }
+    button:disabled { opacity: 0.4; cursor: default; }
+    #status { color: #aaa; font-size: 12px; font-family: monospace; }
+    #error  { color: #ff4444; font-size: 12px; font-family: monospace; display: none; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <button id="exportBtn">Download GIF</button>
+    <div id="status">Initialising…</div>
+    <div id="error"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"
+          onerror="document.getElementById('error').textContent='Failed to load Three.js'; document.getElementById('error').style.display='block'"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.js"
+          onerror="document.getElementById('error').textContent='Failed to load gif.js'; document.getElementById('error').style.display='block'"></script>
+
+  <script>
+    // ─── Constants ────────────────────────────────────────────────────────────
+    const W = 800, H = 600;
+    const COLOR_B  = 0x44ff88;
+    const COLOR_A  = 0xff4444;
+    const COLOR_U  = 0xaa44ff;
+    const RADIUS_B = 6;
+    const RADIUS_A = 4;
+    const BASE_B   = 5;
+    const BASE_A   = 15;
+    const SPRING_SETTLE = 300;
+    const GIF_FPS  = 30;
+
+    // ─── Scene ────────────────────────────────────────────────────────────────
+    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    renderer.setSize(W, H);
+    renderer.setClearColor(0x000000, 1);
+    document.body.appendChild(renderer.domElement);
+
+    const scene  = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, W / H, 1, 2000);
+    camera.position.set(0, 0, 360);
+    camera.lookAt(0, 0, 0);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const pt = new THREE.PointLight(0xffffff, 1.2, 500);
+    pt.position.set(100, 100, 100);
+    scene.add(pt);
+
+    // ─── UI ───────────────────────────────────────────────────────────────────
+    const statusEl  = document.getElementById('status');
+    const errorEl   = document.getElementById('error');
+    const exportBtn = document.getElementById('exportBtn');
+    function setStatus(m) { statusEl.textContent = m; }
+    function setError(m)  { errorEl.textContent = m; errorEl.style.display = m ? 'block' : 'none'; }
+
+    // ─── State ────────────────────────────────────────────────────────────────
+    let simNodes = [], simEdges = [], nodes = [], edges = [], nodeById = new Map();
+    let animating = false, gifCapturing = false, loopStarted = false;
+
+    // ─── Frustum clamp ───────────────────────────────────────────────────────
+    function clampToView(pos) {
+      const MARGIN = 0.75;
+      const ndc = pos.clone().project(camera);
+      if (Math.abs(ndc.x) <= MARGIN && Math.abs(ndc.y) <= MARGIN) return pos;
+      const dir = pos.clone().normalize();
+      let lo = 0, hi = pos.length();
+      for (let i = 0; i < 24; i++) {
+        const mid = (lo + hi) / 2;
+        const t   = dir.clone().multiplyScalar(mid).project(camera);
+        if (Math.abs(t.x) <= MARGIN && Math.abs(t.y) <= MARGIN) lo = mid;
+        else hi = mid;
+      }
+      return dir.multiplyScalar(lo * 0.97);
+    }
+
+    // ─── Spring Layout ────────────────────────────────────────────────────────
+    function runSpring(ns, es, iters) {
+      const KR = 6000, KS = 0.04, KCB = 0.06, KCA = 0.006, DAMP = 0.85;
+      for (let iter = 0; iter < iters; iter++) {
+        const cool = Math.max(0.01, 1 - iter / (iters + 1));
+        for (let i = 0; i < ns.length; i++) {
+          for (let j = i + 1; j < ns.length; j++) {
+            const a = ns[i], b = ns[j];
+            const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+            const d2 = dx*dx + dy*dy + dz*dz + 1;
+            const d  = Math.sqrt(d2);
+            const f  = KR / d2;
+            const fx = f * dx / d, fy = f * dy / d, fz = f * dz / d;
+            a.vx -= fx; a.vy -= fy; a.vz -= fz;
+            b.vx += fx; b.vy += fy; b.vz += fz;
+          }
+        }
+        for (const e of es) {
+          const a = ns[e.si], b = ns[e.ti];
+          const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+          const d  = Math.sqrt(dx*dx + dy*dy + dz*dz) + 0.01;
+          const target = e.weight > 0.6 ? 22 : 42;
+          const f  = KS * (d - target);
+          const fx = f * dx / d, fy = f * dy / d, fz = f * dz / d;
+          a.vx += fx; a.vy += fy; a.vz += fz;
+          b.vx -= fx; b.vy -= fy; b.vz -= fz;
+        }
+        for (const n of ns) {
+          const k = n.type === 'B' ? KCB : KCA;
+          n.vx -= n.x * k; n.vy -= n.y * k; n.vz -= n.z * k;
+        }
+        for (const n of ns) {
+          n.vx *= DAMP; n.vy *= DAMP; n.vz *= DAMP;
+          n.x  += n.vx * cool;
+          n.y  += n.vy * cool;
+          n.z  += n.vz * cool;
+        }
+      }
+    }
+
+    // ─── Edge helpers ─────────────────────────────────────────────────────────
+    function computeCurvePoints(p1, p2, weight) {
+      const mid = new THREE.Vector3(
+        (p1.x + p2.x) / 2, (p1.y + p2.y) / 2, (p1.z + p2.z) / 2
+      );
+      const dx = p2.x - p1.x, dy = p2.y - p1.y, dz = p2.z - p1.z;
+      const lenXY = Math.sqrt(dx*dx + dy*dy);
+      const offset = 12 * weight;
+      if (lenXY > 0.5) {
+        mid.x += (-dy / lenXY) * offset;
+        mid.y += ( dx / lenXY) * offset;
+      } else {
+        const lenXZ = Math.sqrt(dx*dx + dz*dz) || 1;
+        mid.x += (-dz / lenXZ) * offset;
+        mid.z += ( dx / lenXZ) * offset;
+      }
+      return new THREE.QuadraticBezierCurve3(p1.clone(), mid, p2.clone()).getPoints(20);
+    }
+
+    function makeEdgeLine(p1, p2, weight) {
+      const buf = new Float32Array(21 * 3);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(buf, 3));
+      const mat = new THREE.LineBasicMaterial({
+        color: 0xffffff, transparent: true,
+        opacity: Math.min(1, 0.15 + weight * 0.55)
+      });
+      const line = new THREE.Line(geo, mat);
+      writeEdgeBuffer(line, p1, p2, weight);
+      scene.add(line);
+      return line;
+    }
+
+    function writeEdgeBuffer(line, p1, p2, weight) {
+      const pts = computeCurvePoints(p1, p2, weight);
+      const attr = line.geometry.attributes.position;
+      for (let i = 0; i < pts.length; i++) {
+        attr.array[i*3]   = pts[i].x;
+        attr.array[i*3+1] = pts[i].y;
+        attr.array[i*3+2] = pts[i].z;
+      }
+      attr.needsUpdate = true;
+    }
+
+    function disposeEdge(line) {
+      scene.remove(line);
+      line.geometry.dispose();
+      line.material.dispose();
+    }
+
+    // ─── Build base graph ─────────────────────────────────────────────────────
+    function buildBaseGraph() {
+      nodes.forEach(n => { scene.remove(n.mesh); n.mesh.geometry.dispose(); n.mesh.material.dispose(); });
+      edges.forEach(e => disposeEdge(e.line));
+      simNodes = []; simEdges = []; nodes = []; edges = []; nodeById = new Map();
+
+      for (let i = 0; i < BASE_B; i++) {
+        simNodes.push({ id: `B${i}`, type: 'B',
+          x: (rnd()-0.5)*20, y: (rnd()-0.5)*20, z: (rnd()-0.5)*20, vx:0, vy:0, vz:0 });
+      }
+      for (let i = 0; i < BASE_A; i++) {
+        const ang  = (i / BASE_A) * Math.PI * 2;
+        const ring = Math.floor(i / 5);
+        const r    = 35 + ring * 28;
+        simNodes.push({ id: `A${i}`, type: 'A',
+          x: Math.cos(ang)*r + (rnd()-0.5)*12,
+          y: Math.sin(ang)*r + (rnd()-0.5)*12,
+          z: (rnd()-0.5)*35, vx:0, vy:0, vz:0 });
+      }
+
+      for (let i = 0; i < BASE_B; i++)
+        for (let j = i+1; j < BASE_B; j++)
+          simEdges.push({ si: i, ti: j, weight: 0.7 + rnd()*0.3 });
+      for (let i = 0; i < BASE_B; i++) {
+        shuffle([...Array(BASE_A).keys()]).slice(0, 3).forEach(j => {
+          simEdges.push({ si: i, ti: BASE_B + j, weight: 0.3 + rnd()*0.4 });
+        });
+      }
+      for (let i = 0; i < BASE_A; i++) {
+        simEdges.push({ si: BASE_B+i, ti: BASE_B+((i+1)%BASE_A), weight: 0.2+rnd()*0.3 });
+        if (i+5 < BASE_A)
+          simEdges.push({ si: BASE_B+i, ti: BASE_B+i+5, weight: 0.15+rnd()*0.2 });
+      }
+
+      runSpring(simNodes, simEdges, SPRING_SETTLE);
+
+      simNodes.forEach(sn => {
+        const geo = new THREE.SphereGeometry(sn.type==='B' ? RADIUS_B : RADIUS_A, 16, 12);
+        const mat = new THREE.MeshPhongMaterial({ color: sn.type==='B' ? COLOR_B : COLOR_A, shininess: 60 });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(sn.x, sn.y, sn.z);
+        scene.add(mesh);
+        const node = { id: sn.id, mesh };
+        nodes.push(node);
+        nodeById.set(sn.id, node);
+      });
+
+      simEdges.forEach(se => {
+        const p1 = nodes[se.si].mesh.position;
+        const p2 = nodes[se.ti].mesh.position;
+        const line = makeEdgeLine(p1, p2, se.weight);
+        edges.push({ si: se.si, ti: se.ti, weight: se.weight, line });
+      });
+    }
+
+    // ─── Animation ───────────────────────────────────────────────────────────
+    function runAnimation(onFrame) {
+      if (animating) return Promise.resolve();
+      animating = true;
+      exportBtn.disabled = true;
+      setStatus('Animating…');
+
+      return new Promise(resolve => {
+        const HOLD_INITIAL  = 15;
+        const POP_FRAMES    = 8;
+        const APPROACH_FRAMES = 42;
+        const SNAP_FRAMES   = 8;    // colour flash decay
+        const SNAP_SPRING   = 20;   // spring ticks after A snap
+        const LERP_FRAMES   = 14;   // mesh lerp frames
+        const SIZE_FRAMES   = 14;   // A→B size lerp
+        const MATURE_SPRING = 55;   // spring ticks after A→B
+        const MATURE_LERP   = 38;   // mesh lerp after maturation spring
+        const ORBIT_FRAMES  = 80;   // orbit hold
+        const ORBIT_SPEED   = 0.018; // rad/frame
+        const MIN_ORBIT_R   = 22;   // minimum orbital radius (world units)
+
+        // Pick the outermost A node as approach target (outer A frontier)
+        const outerA = simNodes
+          .map((sn, i) => ({ sn, i, d: sn.x*sn.x + sn.y*sn.y + sn.z*sn.z }))
+          .filter(n => n.sn.type === 'A')
+          .sort((a, b) => b.d - a.d)[0];
+        const targetAIdx = outerA.i;
+        const targetAPos = nodes[targetAIdx].mesh.position;
+
+        // Signal approaches from outside screen in the direction of the outer A node.
+        // ease-in-out & moderate emissive = measured/scaffolded (distinct from mal2's charged approach)
+        const approachDir = targetAPos.clone().normalize();
+        const uStart    = clampToView(approachDir.clone().multiplyScalar(targetAPos.length() + 85));
+        const uArrival  = targetAPos.clone().sub(approachDir.clone().multiplyScalar(20));
+
+        // Signal sphere — purple until snap, then becomes the new A node
+        const uGeo = new THREE.SphereGeometry(RADIUS_A, 16, 12);
+        const uMat = new THREE.MeshPhongMaterial({
+          color: COLOR_U, shininess: 80, transparent: true, opacity: 1,
+          emissive: new THREE.Color(0.3, 0.1, 0.7), emissiveIntensity: 1.5
+        });
+        const uMesh = new THREE.Mesh(uGeo, uMat);
+        uMesh.position.copy(uStart);
+        uMesh.scale.set(0.01, 0.01, 0.01);
+        scene.add(uMesh);
+
+        // ── Phase 0: initial hold ─────────────────────────────────────────────
+        function phase0() {
+          let f = 0;
+          function tick() {
+            renderFrame(); if (onFrame) onFrame();
+            if (++f < HOLD_INITIAL) requestAnimationFrame(tick);
+            else phase1();
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 1: pop in at screen edge ────────────────────────────────────
+        function phase1() {
+          let f = 0;
+          function tick() {
+            f++;
+            const t = f / POP_FRAMES;
+            const s = t < 0.5 ? 4*t*t*t : 1 - ((-2*t+2)**3) / 2;
+            uMesh.scale.set(s, s, s);
+            renderFrame(); if (onFrame) onFrame();
+            if (f < POP_FRAMES) requestAnimationFrame(tick);
+            else phase2();
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 2: smooth approach to outer A frontier ──────────────────────
+        // Ease-in-out (measured pace) distinguishes from mal2's charged ease-in approach.
+        // Moderate emissive (1.5→0.3) — calmer than mal2's high-energy signal.
+        function phase2() {
+          let f = 0;
+          function tick() {
+            f++;
+            const t    = f / APPROACH_FRAMES;
+            const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t; // smooth ease-in-out
+            uMesh.position.lerpVectors(uStart, uArrival, ease);
+            uMat.emissiveIntensity = 1.5 * (1 - t * 0.8); // gentle fade
+            renderFrame(); if (onFrame) onFrame();
+            if (f < APPROACH_FRAMES) requestAnimationFrame(tick);
+            else phase3();
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 3: snap in as new A node ────────────────────────────────────
+        // Signal turns red and joins the graph at the A frontier.
+        function phase3() {
+          uMat.color.setHex(COLOR_A);
+          uMat.emissive.setRGB(1, 0.3, 0.2);
+          uMat.emissiveIntensity = 2.5;
+
+          // Register signal mesh as new A node in the simulation
+          const newIdx = simNodes.length;
+          simNodes.push({
+            id: 'newA', type: 'A',
+            x: uMesh.position.x, y: uMesh.position.y, z: uMesh.position.z,
+            vx: 0, vy: 0, vz: 0
+          });
+          nodes.push({ id: 'newA', mesh: uMesh });
+          nodeById.set('newA', nodes[newIdx]);
+
+          // Connect to 2 nearest A nodes
+          const spawnPt = uMesh.position.clone();
+          nodes.slice(0, newIdx)
+            .map((nd, i) => ({ i, dist: nd.mesh.position.distanceTo(spawnPt) }))
+            .filter(({ i }) => simNodes[i] && simNodes[i].type === 'A')
+            .sort((a, b) => a.dist - b.dist)
+            .slice(0, 2)
+            .forEach(({ i, dist }) => {
+              const w = Math.max(0.3, Math.min(0.7, 1 - dist / 120));
+              simEdges.push({ si: newIdx, ti: i, weight: w });
+              edges.push({ si: newIdx, ti: i, weight: w,
+                line: makeEdgeLine(uMesh.position, nodes[i].mesh.position, w) });
+            });
+
+          runSpring(simNodes, simEdges, SNAP_SPRING);
+
+          // Clamp any nodes repulsion pushed off-screen
+          simNodes.forEach(sn => {
+            const p = new THREE.Vector3(sn.x, sn.y, sn.z);
+            const ndc = p.clone().project(camera);
+            if (Math.abs(ndc.x) > 0.75 || Math.abs(ndc.y) > 0.75) {
+              const c = clampToView(p);
+              sn.x = c.x; sn.y = c.y; sn.z = c.z; sn.vx = 0; sn.vy = 0; sn.vz = 0;
+            }
+          });
+
+          const startPos = new Map();
+          nodes.forEach(nd => startPos.set(nd.id, nd.mesh.position.clone()));
+
+          let f = 0;
+          function tick() {
+            f++;
+            const t    = f / LERP_FRAMES;
+            const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+            simNodes.forEach((sn, i) => {
+              const nd = nodes[i]; if (!nd) return;
+              const s = startPos.get(nd.id); if (!s) return;
+              nd.mesh.position.set(s.x+(sn.x-s.x)*ease, s.y+(sn.y-s.y)*ease, s.z+(sn.z-s.z)*ease);
+            });
+            uMat.emissiveIntensity = Math.max(0, 2.5 * (1 - t));
+            edges.forEach(e => {
+              const p1 = nodes[e.si]?.mesh.position;
+              const p2 = nodes[e.ti]?.mesh.position;
+              if (p1 && p2) writeEdgeBuffer(e.line, p1, p2, e.weight);
+            });
+            renderFrame(); if (onFrame) onFrame();
+            if (f < LERP_FRAMES) requestAnimationFrame(tick);
+            else phase4(newIdx);
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 4: colour snap A→B ──────────────────────────────────────────
+        function phase4(newIdx) {
+          uMat.color.setHex(COLOR_B);
+          uMat.emissive.setRGB(0.3, 1, 0.5);
+          uMat.emissiveIntensity = 3.5;
+          let f = 0;
+          function tick() {
+            f++;
+            uMat.emissiveIntensity = 3.5 * (1 - f / SNAP_FRAMES);
+            renderFrame(); if (onFrame) onFrame();
+            if (f < SNAP_FRAMES) requestAnimationFrame(tick);
+            else {
+              uMat.emissiveIntensity = 0;
+              phase5(newIdx);
+            }
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 5: size lerp A radius → B radius ────────────────────────────
+        function phase5(newIdx) {
+          const endScale = RADIUS_B / RADIUS_A; // 1.5
+          let f = 0;
+          function tick() {
+            f++;
+            const t = f / SIZE_FRAMES;
+            const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+            const s = 1 + (endScale - 1) * ease;
+            uMesh.scale.set(s, s, s);
+            renderFrame(); if (onFrame) onFrame();
+            if (f < SIZE_FRAMES) requestAnimationFrame(tick);
+            else phase6(newIdx);
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 6: spring reorganise — new B pulled toward B cluster ─────────
+        function phase6(newIdx) {
+          simNodes[newIdx].type = 'B';
+
+          // Upgrade edges from newB to existing B nodes (stronger pull = target 22 vs 42)
+          simEdges.forEach(se => {
+            if (se.si === newIdx || se.ti === newIdx) {
+              const otherIdx = se.si === newIdx ? se.ti : se.si;
+              if (simNodes[otherIdx].type === 'B') {
+                se.weight = Math.max(se.weight, 0.75);
+                const edgeObj = edges.find(e => e.si === se.si && e.ti === se.ti);
+                if (edgeObj) edgeObj.line.material.opacity = Math.min(1, 0.15 + se.weight * 0.55);
+              }
+            }
+          });
+
+          // Ensure strong bond between maladaptive B (B0 = nodes[0]) and new B
+          const hasBond = simEdges.some(se =>
+            (se.si === 0 && se.ti === newIdx) || (se.si === newIdx && se.ti === 0)
+          );
+          if (!hasBond) {
+            simEdges.push({ si: 0, ti: newIdx, weight: 0.85 });
+            edges.push({ si: 0, ti: newIdx, weight: 0.85,
+              line: makeEdgeLine(nodes[0].mesh.position, nodes[newIdx].mesh.position, 0.85) });
+          } else {
+            simEdges.forEach(se => {
+              if ((se.si === 0 && se.ti === newIdx) || (se.si === newIdx && se.ti === 0)) {
+                se.weight = Math.max(se.weight, 0.85);
+                const edgeObj = edges.find(e =>
+                  (e.si === 0 && e.ti === newIdx) || (e.si === newIdx && e.ti === 0));
+                if (edgeObj) edgeObj.line.material.opacity = Math.min(1, 0.15 + 0.85 * 0.55);
+              }
+            });
+          }
+
+          runSpring(simNodes, simEdges, MATURE_SPRING);
+
+          simNodes.forEach(sn => {
+            const p = new THREE.Vector3(sn.x, sn.y, sn.z);
+            const ndc = p.clone().project(camera);
+            if (Math.abs(ndc.x) > 0.75 || Math.abs(ndc.y) > 0.75) {
+              const c = clampToView(p);
+              sn.x = c.x; sn.y = c.y; sn.z = c.z; sn.vx = 0; sn.vy = 0; sn.vz = 0;
+            }
+          });
+
+          const startPos = new Map();
+          nodes.forEach(nd => startPos.set(nd.id, nd.mesh.position.clone()));
+
+          let f = 0;
+          function tick() {
+            f++;
+            const t    = f / MATURE_LERP;
+            const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+            simNodes.forEach((sn, i) => {
+              const nd = nodes[i]; if (!nd) return;
+              const s = startPos.get(nd.id); if (!s) return;
+              nd.mesh.position.set(s.x+(sn.x-s.x)*ease, s.y+(sn.y-s.y)*ease, s.z+(sn.z-s.z)*ease);
+            });
+            edges.forEach(e => {
+              const p1 = nodes[e.si]?.mesh.position;
+              const p2 = nodes[e.ti]?.mesh.position;
+              if (p1 && p2) writeEdgeBuffer(e.line, p1, p2, e.weight);
+            });
+            renderFrame(); if (onFrame) onFrame();
+            if (f < MATURE_LERP) requestAnimationFrame(tick);
+            else phase7(newIdx);
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 7: equal binary orbit ───────────────────────────────────────
+        // B0 (maladaptive, nodes[0]) and newB (nodes[newIdx]) orbit each other as equals.
+        // Orbit centre = midpoint. Equal radius, equal size, equal brightness.
+        // Orbit remains integrated with broader B cluster (centre near scene origin).
+        function phase7(newIdx) {
+          const b0Mesh = nodes[0].mesh;
+          const nbMesh = nodes[newIdx].mesh;
+
+          const orbitCentre = new THREE.Vector3(
+            (b0Mesh.position.x + nbMesh.position.x) / 2,
+            (b0Mesh.position.y + nbMesh.position.y) / 2,
+            (b0Mesh.position.z + nbMesh.position.z) / 2
+          );
+
+          // Orbital radius = half distance between them, minimum MIN_ORBIT_R
+          const halfDist = b0Mesh.position.distanceTo(nbMesh.position) / 2;
+          const orbitR = Math.max(MIN_ORBIT_R, halfDist);
+
+          // Starting angle: direction from centre to B0 in XY plane
+          const toB0 = b0Mesh.position.clone().sub(orbitCentre);
+          let angle = Math.atan2(toB0.y, toB0.x);
+          const orbitZ = orbitCentre.z;
+
+          // Snap both to exact orbital radius (preserves continuity at t=0)
+          b0Mesh.position.set(
+            orbitCentre.x + Math.cos(angle) * orbitR,
+            orbitCentre.y + Math.sin(angle) * orbitR,
+            orbitZ
+          );
+          nbMesh.position.set(
+            orbitCentre.x + Math.cos(angle + Math.PI) * orbitR,
+            orbitCentre.y + Math.sin(angle + Math.PI) * orbitR,
+            orbitZ
+          );
+
+          function updateOrbitalEdges() {
+            edges.forEach(e => {
+              if (e.si === 0 || e.ti === 0 || e.si === newIdx || e.ti === newIdx) {
+                const p1 = nodes[e.si]?.mesh.position;
+                const p2 = nodes[e.ti]?.mesh.position;
+                if (p1 && p2) writeEdgeBuffer(e.line, p1, p2, e.weight);
+              }
+            });
+          }
+
+          let f = 0;
+          function tick() {
+            f++;
+            angle += ORBIT_SPEED;
+            b0Mesh.position.set(
+              orbitCentre.x + Math.cos(angle) * orbitR,
+              orbitCentre.y + Math.sin(angle) * orbitR,
+              orbitZ
+            );
+            nbMesh.position.set(
+              orbitCentre.x + Math.cos(angle + Math.PI) * orbitR,
+              orbitCentre.y + Math.sin(angle + Math.PI) * orbitR,
+              orbitZ
+            );
+            updateOrbitalEdges();
+            renderFrame(); if (onFrame) onFrame();
+            if (f < ORBIT_FRAMES) requestAnimationFrame(tick);
+            else {
+              animating = false;
+              exportBtn.disabled = false;
+              setStatus('Done.');
+              resolve();
+            }
+          }
+          requestAnimationFrame(tick);
+        }
+
+        renderFrame(); if (onFrame) onFrame();
+        phase0();
+      });
+    }
+
+    // ─── GIF Export ───────────────────────────────────────────────────────────
+    async function createGifEncoder() {
+      let workerSrc;
+      try {
+        const resp = await fetch('https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js');
+        if (!resp.ok) throw new Error('fetch failed');
+        const text = await resp.text();
+        workerSrc = URL.createObjectURL(new Blob([text], { type: 'application/javascript' }));
+      } catch (_) {
+        workerSrc = 'https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js';
+      }
+      return new GIF({ workers: 2, quality: 8, width: W, height: H, workerScript: workerSrc });
+    }
+
+    async function exportGif() {
+      if (gifCapturing || animating) return;
+      gifCapturing = true;
+      exportBtn.disabled = true;
+      setStatus('Preparing GIF encoder…');
+      setError('');
+
+      let gif;
+      try {
+        gif = await createGifEncoder();
+      } catch (e) {
+        setError('Export failed: could not create GIF encoder.');
+        gifCapturing = false;
+        exportBtn.disabled = false;
+        return;
+      }
+
+      const delay = Math.round(1000 / GIF_FPS);
+      function captureFrame() {
+        gif.addFrame(renderer.domElement, { copy: true, delay });
+      }
+
+      buildBaseGraph();
+      renderFrame();
+      setStatus('Capturing animation…');
+
+      await runAnimation(captureFrame);
+
+      for (let i = 0; i < 25; i++) captureFrame();
+
+      gif.on('finished', blob => {
+        const url = URL.createObjectURL(blob);
+        const a   = document.createElement('a');
+        a.href     = url;
+        a.download = 'mal3-feedback-integrated-equal.gif';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 200);
+        gifCapturing = false;
+        exportBtn.disabled = false;
+        setStatus('GIF downloaded.');
+      });
+
+      gif.on('error', err => {
+        setError('Export failed: ' + (err?.message ?? String(err)));
+        gifCapturing = false;
+        exportBtn.disabled = false;
+      });
+
+      setTimeout(() => {
+        if (gifCapturing) {
+          setError('Export timed out. Try again.');
+          gifCapturing = false;
+          exportBtn.disabled = false;
+        }
+      }, 90000);
+
+      setStatus('Rendering GIF (this takes ~20–30s)…');
+      gif.render();
+    }
+
+    // ─── Utility ─────────────────────────────────────────────────────────────
+    function rnd() { return Math.random(); }
+    function shuffle(arr) {
+      for (let i = arr.length-1; i > 0; i--) {
+        const j = Math.floor(rnd()*(i+1)); [arr[i],arr[j]] = [arr[j],arr[i]];
+      }
+      return arr;
+    }
+
+    // ─── Rotation & render ────────────────────────────────────────────────────
+    function renderFrame() {
+      const t = performance.now();
+      scene.rotation.y = t * 0.00015;
+      scene.rotation.x = Math.sin(t * 0.0003) * 0.10;
+      renderer.render(scene, camera);
+    }
+
+    // ─── Render loop ─────────────────────────────────────────────────────────
+    function startRenderLoop() {
+      if (loopStarted) return;
+      loopStarted = true;
+      (function loop() {
+        requestAnimationFrame(loop);
+        if (!animating && !gifCapturing) renderFrame();
+      })();
+    }
+
+    // ─── Init ─────────────────────────────────────────────────────────────────
+    exportBtn.addEventListener('click', exportGif);
+
+    try {
+      buildBaseGraph();
+      renderFrame();
+      setStatus('Starting animation…');
+      startRenderLoop();
+      setTimeout(() => runAnimation(null), 600);
+    } catch (e) {
+      setError('Init error: ' + e.message);
+      console.error(e);
+    }
+  </script>
+</body>
+</html>
