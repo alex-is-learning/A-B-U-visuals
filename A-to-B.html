@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>A/B/U 3D Network — GIF 2: A→B Maturation</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; }
+    canvas { display: block; }
+    #ui {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: flex-end;
+    }
+    button {
+      padding: 8px 16px;
+      background: #fff;
+      color: #000;
+      border: none;
+      cursor: pointer;
+      font-size: 14px;
+      font-family: monospace;
+    }
+    button:disabled { opacity: 0.4; cursor: default; }
+    #status { color: #aaa; font-size: 12px; font-family: monospace; }
+    #error  { color: #ff4444; font-size: 12px; font-family: monospace; display: none; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <button id="exportBtn">Download GIF</button>
+    <button id="logBtn">Log Nodes</button>
+    <div id="status">Initialising…</div>
+    <div id="error"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"
+          onerror="document.getElementById('error').textContent='Failed to load Three.js'; document.getElementById('error').style.display='block'"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.js"
+          onerror="document.getElementById('error').textContent='Failed to load gif.js'; document.getElementById('error').style.display='block'"></script>
+
+  <script>
+    // ─── Constants ────────────────────────────────────────────────────────────
+    const W = 800, H = 600;
+    const COLOR_B = 0x44ff88;
+    const COLOR_A = 0xff4444;
+    const RADIUS_B = 6;
+    const RADIUS_A = 4;
+    const BASE_B = 5;
+    const BASE_A = 15;
+    const SPRING_SETTLE  = 300;
+    const SPRING_REORG   = 60;   // ticks run during reorganise phase
+    const GIF_FPS = 30;
+
+    // ─── Scene ────────────────────────────────────────────────────────────────
+    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    renderer.setSize(W, H);
+    renderer.setClearColor(0x000000, 1);
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, W / H, 1, 2000);
+    camera.position.set(0, 0, 360);
+    camera.lookAt(0, 0, 0);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const pt = new THREE.PointLight(0xffffff, 1.2, 500);
+    pt.position.set(100, 100, 100);
+    scene.add(pt);
+
+    // ─── UI ───────────────────────────────────────────────────────────────────
+    const statusEl  = document.getElementById('status');
+    const errorEl   = document.getElementById('error');
+    const exportBtn = document.getElementById('exportBtn');
+    function setStatus(m) { statusEl.textContent = m; }
+    function setError(m)  { errorEl.textContent = m; errorEl.style.display = m ? 'block' : 'none'; }
+
+    // ─── State ────────────────────────────────────────────────────────────────
+    let simNodes = [], simEdges = [], nodes = [], edges = [], nodeById = new Map();
+    let animating = false, gifCapturing = false, loopStarted = false;
+
+    // ─── Frustum clamp ───────────────────────────────────────────────────────
+    function clampToView(pos) {
+      const MARGIN = 0.75;
+      const ndc = pos.clone().project(camera);
+      if (Math.abs(ndc.x) <= MARGIN && Math.abs(ndc.y) <= MARGIN) return pos;
+      const dir = pos.clone().normalize();
+      let lo = 0, hi = pos.length();
+      for (let i = 0; i < 24; i++) {
+        const mid = (lo + hi) / 2;
+        const t   = dir.clone().multiplyScalar(mid).project(camera);
+        if (Math.abs(t.x) <= MARGIN && Math.abs(t.y) <= MARGIN) lo = mid;
+        else hi = mid;
+      }
+      return dir.multiplyScalar(lo * 0.97);
+    }
+
+    // ─── Spring Layout ────────────────────────────────────────────────────────
+    function runSpring(ns, es, iters) {
+      const KR = 6000, KS = 0.04, KCB = 0.06, KCA = 0.006, DAMP = 0.85;
+      for (let iter = 0; iter < iters; iter++) {
+        const cool = Math.max(0.01, 1 - iter / (iters + 1));
+        // Repulsion
+        for (let i = 0; i < ns.length; i++) {
+          for (let j = i + 1; j < ns.length; j++) {
+            const a = ns[i], b = ns[j];
+            const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+            const d2 = dx*dx + dy*dy + dz*dz + 1;
+            const d  = Math.sqrt(d2);
+            const f  = KR / d2;
+            const fx = f * dx / d, fy = f * dy / d, fz = f * dz / d;
+            a.vx -= fx; a.vy -= fy; a.vz -= fz;
+            b.vx += fx; b.vy += fy; b.vz += fz;
+          }
+        }
+        // Spring attraction along edges
+        for (const e of es) {
+          const a = ns[e.si], b = ns[e.ti];
+          const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+          const d  = Math.sqrt(dx*dx + dy*dy + dz*dz) + 0.01;
+          const target = e.weight > 0.6 ? 22 : 42;
+          const f  = KS * (d - target);
+          const fx = f * dx / d, fy = f * dy / d, fz = f * dz / d;
+          a.vx += fx; a.vy += fy; a.vz += fz;
+          b.vx -= fx; b.vy -= fy; b.vz -= fz;
+        }
+        // Centre pull
+        for (const n of ns) {
+          const k = n.type === 'B' ? KCB : KCA;
+          n.vx -= n.x * k; n.vy -= n.y * k; n.vz -= n.z * k;
+        }
+        // Integrate
+        for (const n of ns) {
+          n.vx *= DAMP; n.vy *= DAMP; n.vz *= DAMP;
+          n.x  += n.vx * cool;
+          n.y  += n.vy * cool;
+          n.z  += n.vz * cool;
+        }
+      }
+    }
+
+    // ─── Edge helpers ─────────────────────────────────────────────────────────
+    function computeCurvePoints(p1, p2, weight) {
+      const mid = new THREE.Vector3(
+        (p1.x + p2.x) / 2, (p1.y + p2.y) / 2, (p1.z + p2.z) / 2
+      );
+      const dx = p2.x - p1.x, dy = p2.y - p1.y, dz = p2.z - p1.z;
+      const lenXY = Math.sqrt(dx*dx + dy*dy);
+      const offset = 12 * weight;
+      if (lenXY > 0.5) {
+        mid.x += (-dy / lenXY) * offset;
+        mid.y += ( dx / lenXY) * offset;
+      } else {
+        const lenXZ = Math.sqrt(dx*dx + dz*dz) || 1;
+        mid.x += (-dz / lenXZ) * offset;
+        mid.z += ( dx / lenXZ) * offset;
+      }
+      return new THREE.QuadraticBezierCurve3(p1.clone(), mid, p2.clone()).getPoints(20);
+    }
+
+    function makeEdgeLine(p1, p2, weight) {
+      const buf = new Float32Array(21 * 3);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(buf, 3));
+      const mat = new THREE.LineBasicMaterial({
+        color: 0xffffff, transparent: true,
+        opacity: Math.min(1, 0.15 + weight * 0.55)
+      });
+      const line = new THREE.Line(geo, mat);
+      writeEdgeBuffer(line, p1, p2, weight);
+      scene.add(line);
+      return line;
+    }
+
+    function writeEdgeBuffer(line, p1, p2, weight) {
+      const pts = computeCurvePoints(p1, p2, weight);
+      const attr = line.geometry.attributes.position;
+      for (let i = 0; i < pts.length; i++) {
+        attr.array[i*3]   = pts[i].x;
+        attr.array[i*3+1] = pts[i].y;
+        attr.array[i*3+2] = pts[i].z;
+      }
+      attr.needsUpdate = true;
+    }
+
+    function disposeEdge(line) {
+      scene.remove(line);
+      line.geometry.dispose();
+      line.material.dispose();
+    }
+
+    // ─── Build base graph ─────────────────────────────────────────────────────
+    function buildBaseGraph() {
+      nodes.forEach(n => { scene.remove(n.mesh); n.mesh.geometry.dispose(); n.mesh.material.dispose(); });
+      edges.forEach(e => disposeEdge(e.line));
+      simNodes = []; simEdges = []; nodes = []; edges = []; nodeById = new Map();
+
+      for (let i = 0; i < BASE_B; i++) {
+        simNodes.push({ id: `B${i}`, type: 'B',
+          x: (rnd()-0.5)*20, y: (rnd()-0.5)*20, z: (rnd()-0.5)*20, vx:0, vy:0, vz:0 });
+      }
+      for (let i = 0; i < BASE_A; i++) {
+        const ang = (i / BASE_A) * Math.PI * 2;
+        const ring = Math.floor(i / 5);
+        const r = 35 + ring * 28;
+        simNodes.push({ id: `A${i}`, type: 'A',
+          x: Math.cos(ang)*r + (rnd()-0.5)*12,
+          y: Math.sin(ang)*r + (rnd()-0.5)*12,
+          z: (rnd()-0.5)*35, vx:0, vy:0, vz:0 });
+      }
+
+      // B–B (strong)
+      for (let i = 0; i < BASE_B; i++)
+        for (let j = i+1; j < BASE_B; j++)
+          simEdges.push({ si: i, ti: j, weight: 0.7 + rnd()*0.3 });
+      // B → 3 random As
+      for (let i = 0; i < BASE_B; i++) {
+        shuffle([...Array(BASE_A).keys()]).slice(0, 3).forEach(j => {
+          simEdges.push({ si: i, ti: BASE_B + j, weight: 0.3 + rnd()*0.4 });
+        });
+      }
+      // A ring neighbours + cross-ring
+      for (let i = 0; i < BASE_A; i++) {
+        simEdges.push({ si: BASE_B+i, ti: BASE_B+((i+1)%BASE_A), weight: 0.2+rnd()*0.3 });
+        if (i+5 < BASE_A)
+          simEdges.push({ si: BASE_B+i, ti: BASE_B+i+5, weight: 0.15+rnd()*0.2 });
+      }
+
+      runSpring(simNodes, simEdges, SPRING_SETTLE);
+
+      simNodes.forEach(sn => {
+        const geo = new THREE.SphereGeometry(sn.type==='B' ? RADIUS_B : RADIUS_A, 16, 12);
+        const mat = new THREE.MeshPhongMaterial({ color: sn.type==='B' ? COLOR_B : COLOR_A, shininess: 60 });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(sn.x, sn.y, sn.z);
+        scene.add(mesh);
+        const node = { id: sn.id, mesh };
+        nodes.push(node);
+        nodeById.set(sn.id, node);
+      });
+
+      simEdges.forEach(se => {
+        const p1 = nodes[se.si].mesh.position;
+        const p2 = nodes[se.ti].mesh.position;
+        const line = makeEdgeLine(p1, p2, se.weight);
+        edges.push({ si: se.si, ti: se.ti, weight: se.weight, line });
+      });
+    }
+
+    // ─── GIF 2 Animation ─────────────────────────────────────────────────────
+    function runGif2Animation(onFrame) {
+      if (animating) return Promise.resolve();
+      animating = true;
+      exportBtn.disabled = true;
+      setStatus('Animating…');
+
+      return new Promise(resolve => {
+        // Phase frame counts (at 30fps)
+        const HOLD_INITIAL  = 15;  // ~0.5s initial hold
+        const BEAM_FRAMES   = 12;  // ~0.4s beam travels in + dot races to target
+        const IMPACT_FRAMES = 8;   // ~0.27s impact flash + beam fades out
+        const SNAP_FRAMES   = 8;   // ~0.27s colour snap green emissive flash
+        const SIZE_FRAMES   = 14;  // ~0.47s size lerp A→B
+        const LERP_FRAMES   = 38;  // ~1.3s spring reorganise lerp
+        const HOLD_END      = 22;  // ~0.7s hold end state
+
+        // Pick target A: 25th-percentile closest to center —
+        // close enough for visible inward snap, not already crowded in the B cluster.
+        const aNodes = simNodes
+          .map((sn, i) => ({ sn, i, d: Math.sqrt(sn.x*sn.x + sn.y*sn.y + sn.z*sn.z) }))
+          .filter(n => n.sn.type === 'A')
+          .sort((a, b) => a.d - b.d);
+        const targetData = aNodes[Math.floor(aNodes.length * 0.25)];
+        const targetIdx  = targetData.i;
+        const targetMesh = nodes[targetIdx].mesh;
+        const targetSim  = simNodes[targetIdx];
+
+        // Beam origin: well off-screen upper-right.
+        // Frustum at z=0 is ~±277 x ±208 world units, so (420, 270, 0) is clearly outside.
+        const beamOrigin = new THREE.Vector3(420, 270, 0);
+
+        // ── Build laser beam objects ─────────────────────────────────────────
+        // Beam: straight cyan line from origin to target (straight = distinct from curved edges)
+        const beamPts = [beamOrigin.clone(), targetMesh.position.clone()];
+        const beamGeo = new THREE.BufferGeometry().setFromPoints(beamPts);
+        const beamMat = new THREE.LineBasicMaterial({
+          color: 0x00ddff, transparent: true, opacity: 0
+        });
+        const beamLine = new THREE.Line(beamGeo, beamMat);
+        scene.add(beamLine);
+
+        // Dot: small bright sphere that races along the beam
+        const dotGeo  = new THREE.SphereGeometry(2.5, 8, 6);
+        const dotMat  = new THREE.MeshPhongMaterial({
+          color: 0x00ddff,
+          emissive: new THREE.Color(0, 0.85, 1),
+          emissiveIntensity: 4.0
+        });
+        const dotMesh = new THREE.Mesh(dotGeo, dotMat);
+        dotMesh.position.copy(beamOrigin);
+        dotMesh.visible  = false;
+        scene.add(dotMesh);
+
+        function disposeLaser() {
+          scene.remove(beamLine); beamGeo.dispose(); beamMat.dispose();
+          scene.remove(dotMesh);  dotGeo.dispose();  dotMat.dispose();
+        }
+
+        // ── Phase 0: initial hold ────────────────────────────────────────────
+        function phase0() {
+          let f = 0;
+          function tick() {
+            renderFrame();
+            if (onFrame) onFrame();
+            f++;
+            if (f < HOLD_INITIAL) requestAnimationFrame(tick);
+            else phase1();
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 1: beam arrives, dot travels ──────────────────────────────
+        // Beam fades in quickly (first 4 frames), dot lerps from origin to target.
+        function phase1() {
+          beamLine.visible = true;
+          dotMesh.visible  = true;
+          const origin = beamOrigin.clone();
+          const dest   = targetMesh.position.clone();
+          let f = 0;
+          function tick() {
+            const t = f / BEAM_FRAMES;
+            // Beam: fast fade-in then hold
+            beamMat.opacity = Math.min(0.75, (f / 4) * 0.75);
+            // Dot: ease-in-out travel along beam
+            const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+            dotMesh.position.lerpVectors(origin, dest, ease);
+            renderFrame();
+            if (onFrame) onFrame();
+            f++;
+            if (f < BEAM_FRAMES) requestAnimationFrame(tick);
+            else phase2();
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 2: impact — flash on node, beam fades out ──────────────────
+        function phase2() {
+          // Dot snaps to target and becomes the impact flash
+          dotMesh.position.copy(targetMesh.position);
+          targetMesh.material.emissive = new THREE.Color(0, 0.85, 1);
+          targetMesh.material.emissiveIntensity = 4.0;
+          let f = 0;
+          function tick() {
+            const t = f / IMPACT_FRAMES;
+            // Node impact flash decays
+            targetMesh.material.emissiveIntensity = 4.0 * (1 - t);
+            // Dot scales up and fades as it "splashes" into the node
+            const splash = 1 + t * 3;
+            dotMesh.scale.set(splash, splash, splash);
+            dotMat.opacity = 1 - t;
+            dotMat.transparent = true;
+            // Beam fades out
+            beamMat.opacity = 0.75 * (1 - t);
+            renderFrame();
+            if (onFrame) onFrame();
+            f++;
+            if (f < IMPACT_FRAMES) requestAnimationFrame(tick);
+            else {
+              disposeLaser();
+              targetMesh.material.emissiveIntensity = 0;
+              phase3();
+            }
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 3: colour snap red→green + emissive flash ─────────────────
+        function phase3() {
+          targetMesh.material.color.setHex(COLOR_B);
+          targetMesh.material.emissive = new THREE.Color(0.3, 1, 0.5);
+          targetMesh.material.emissiveIntensity = 3.5;
+          let f = 0;
+          function tick() {
+            const t = f / SNAP_FRAMES;
+            targetMesh.material.emissiveIntensity = 3.5 * (1 - t);
+            renderFrame();
+            if (onFrame) onFrame();
+            f++;
+            if (f < SNAP_FRAMES) requestAnimationFrame(tick);
+            else {
+              targetMesh.material.emissiveIntensity = 0;
+              phase4();
+            }
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 4: size lerp RADIUS_A → RADIUS_B ──────────────────────────
+        function phase4() {
+          const endScale = RADIUS_B / RADIUS_A;   // 1.5
+          let f = 0;
+          function tick() {
+            const t = f / SIZE_FRAMES;
+            const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+            const s = 1 + (endScale - 1) * ease;
+            targetMesh.scale.set(s, s, s);
+            renderFrame();
+            if (onFrame) onFrame();
+            f++;
+            if (f < SIZE_FRAMES) requestAnimationFrame(tick);
+            else phase5();
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 5: spring reorganise ───────────────────────────────────────
+        function phase5() {
+          // Switch type so centre pull uses KCB (10× stronger)
+          targetSim.type = 'B';
+
+          // Upgrade edges from matured node to existing B nodes to strong weight
+          // so their target distance shrinks 42→22, pulling it into the B cluster.
+          simEdges.forEach(se => {
+            if (se.si === targetIdx || se.ti === targetIdx) {
+              const otherIdx = se.si === targetIdx ? se.ti : se.si;
+              if (simNodes[otherIdx].type === 'B') {
+                se.weight = Math.max(se.weight, 0.75);
+                const edgeObj = edges.find(e => e.si === se.si && e.ti === se.ti);
+                if (edgeObj) edgeObj.line.material.opacity = Math.min(1, 0.15 + se.weight * 0.55);
+              }
+            }
+          });
+
+          // Run spring — type change + weight changes drive the reorganisation
+          runSpring(simNodes, simEdges, SPRING_REORG);
+
+          // Clamp any nodes pushed out of view by repulsion
+          simNodes.forEach(sn => {
+            const p = new THREE.Vector3(sn.x, sn.y, sn.z);
+            const ndc = p.clone().project(camera);
+            if (Math.abs(ndc.x) > 0.75 || Math.abs(ndc.y) > 0.75) {
+              const c = clampToView(p);
+              sn.x = c.x; sn.y = c.y; sn.z = c.z;
+              sn.vx = 0; sn.vy = 0; sn.vz = 0;
+            }
+          });
+
+          // Snapshot current mesh positions as lerp start
+          const startPos = new Map();
+          nodes.forEach(nd => {
+            startPos.set(nd.id, { x: nd.mesh.position.x, y: nd.mesh.position.y, z: nd.mesh.position.z });
+          });
+
+          let f = 0;
+          function tick() {
+            const t = f / LERP_FRAMES;
+            const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+
+            simNodes.forEach((sn, i) => {
+              const nd = nodes[i];
+              if (!nd) return;
+              const s = startPos.get(nd.id);
+              if (!s) return;
+              nd.mesh.position.set(
+                s.x + (sn.x - s.x) * ease,
+                s.y + (sn.y - s.y) * ease,
+                s.z + (sn.z - s.z) * ease
+              );
+            });
+
+            edges.forEach(e => {
+              const p1 = nodes[e.si]?.mesh.position;
+              const p2 = nodes[e.ti]?.mesh.position;
+              if (p1 && p2) writeEdgeBuffer(e.line, p1, p2, e.weight);
+            });
+
+            renderFrame();
+            if (onFrame) onFrame();
+            f++;
+            if (f < LERP_FRAMES) requestAnimationFrame(tick);
+            else phase6();
+          }
+          requestAnimationFrame(tick);
+        }
+
+        // ── Phase 6: hold end state ──────────────────────────────────────────
+        function phase6() {
+          let f = 0;
+          function tick() {
+            renderFrame();
+            if (onFrame) onFrame();
+            f++;
+            if (f < HOLD_END) requestAnimationFrame(tick);
+            else {
+              animating = false;
+              if (!gifCapturing) {
+                exportBtn.disabled = false;
+                setStatus('Done.');
+              }
+              resolve();
+            }
+          }
+          requestAnimationFrame(tick);
+        }
+
+        renderFrame();
+        if (onFrame) onFrame();
+        phase0();
+      });
+    }
+
+    // ─── GIF Export ───────────────────────────────────────────────────────────
+    async function createGifEncoder() {
+      let workerSrc;
+      try {
+        const resp = await fetch('https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js');
+        if (!resp.ok) throw new Error('fetch failed');
+        const text = await resp.text();
+        workerSrc = URL.createObjectURL(new Blob([text], { type: 'application/javascript' }));
+      } catch (_) {
+        workerSrc = 'https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js';
+      }
+      return new GIF({ workers: 2, quality: 8, width: W, height: H, workerScript: workerSrc });
+    }
+
+    async function exportGif() {
+      if (gifCapturing || animating) return;
+      gifCapturing = true;
+      exportBtn.disabled = true;
+      setStatus('Preparing GIF encoder…');
+      setError('');
+
+      let gif;
+      try {
+        gif = await createGifEncoder();
+      } catch (e) {
+        setError('Export failed: could not create GIF encoder.');
+        gifCapturing = false;
+        exportBtn.disabled = false;
+        return;
+      }
+
+      const delay = Math.round(1000 / GIF_FPS);
+      function captureFrame() {
+        gif.addFrame(renderer.domElement, { copy: true, delay });
+      }
+
+      buildBaseGraph();
+      renderFrame();
+      setStatus('Capturing animation…');
+
+      await runGif2Animation(captureFrame);
+
+      // Hold frames at end
+      for (let i = 0; i < 20; i++) captureFrame();
+
+      gif.on('finished', blob => {
+        const url = URL.createObjectURL(blob);
+        const a   = document.createElement('a');
+        a.href     = url;
+        a.download = 'gif2-a-to-b.gif';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 200);
+        gifCapturing = false;
+        exportBtn.disabled = false;
+        setStatus('GIF downloaded.');
+      });
+
+      gif.on('error', err => {
+        setError('Export failed: ' + (err?.message ?? String(err)));
+        gifCapturing = false;
+        exportBtn.disabled = false;
+      });
+
+      setTimeout(() => {
+        if (gifCapturing) {
+          setError('Export timed out. Try again.');
+          gifCapturing = false;
+          exportBtn.disabled = false;
+        }
+      }, 90000);
+
+      setStatus('Rendering GIF (this takes ~20–30s)…');
+      gif.render();
+    }
+
+    // ─── Node position log ────────────────────────────────────────────────────
+    function logNodes() {
+      const fovY = camera.fov * Math.PI / 180;
+      const TV   = Math.tan(fovY / 2);
+      const TH   = TV * camera.aspect;
+      const camZ = camera.position.z;
+      const fW   = (camZ * TH * 2).toFixed(1);
+      const fH   = (camZ * TV * 2).toFixed(1);
+      console.log(`\n=== NODE LOG ===`);
+      console.log(`Canvas: ${W}×${H}px   Camera z: ${camZ}   FOV: ${camera.fov}°   Aspect: ${camera.aspect.toFixed(3)}`);
+      console.log(`Frustum at world z=0: ${fW} wide × ${fH} tall (world units)`);
+      nodes.forEach((nd, i) => {
+        const p   = nd.mesh.position;
+        const ndc = p.clone().project(camera);
+        const ok  = Math.abs(ndc.x) <= 1 && Math.abs(ndc.y) <= 1;
+        const type = simNodes[i]?.type ?? '?';
+        console.log(`${nd.id.padEnd(10)} ${type.padEnd(4)} (${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)}) NDC(${ndc.x.toFixed(3)},${ndc.y.toFixed(3)}) ${ok ? '✓' : '✗ OFF-SCREEN'}`);
+      });
+    }
+
+    // ─── Utility ─────────────────────────────────────────────────────────────
+    function rnd() { return Math.random(); }
+    function shuffle(arr) {
+      for (let i = arr.length-1; i > 0; i--) {
+        const j = Math.floor(rnd()*(i+1)); [arr[i],arr[j]] = [arr[j],arr[i]];
+      }
+      return arr;
+    }
+
+    // ─── Rotation & render ────────────────────────────────────────────────────
+    function renderFrame() {
+      const t = performance.now();
+      scene.rotation.y = t * 0.00015;
+      scene.rotation.x = Math.sin(t * 0.0003) * 0.10;
+      renderer.render(scene, camera);
+    }
+
+    // ─── Render loop ─────────────────────────────────────────────────────────
+    function startRenderLoop() {
+      if (loopStarted) return;
+      loopStarted = true;
+      (function loop() {
+        requestAnimationFrame(loop);
+        if (!animating && !gifCapturing) renderFrame();
+      })();
+    }
+
+    // ─── Init ─────────────────────────────────────────────────────────────────
+    exportBtn.addEventListener('click', exportGif);
+    document.getElementById('logBtn').addEventListener('click', logNodes);
+
+    try {
+      buildBaseGraph();
+      renderFrame();
+      setStatus('Starting animation…');
+      startRenderLoop();
+      setTimeout(() => runGif2Animation(null), 600);
+    } catch (e) {
+      setError('Init error: ' + e.message);
+      console.error(e);
+    }
+  </script>
+</body>
+</html>

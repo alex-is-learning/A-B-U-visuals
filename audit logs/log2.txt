@@ -1,0 +1,75 @@
+=== ABU FRONTIER GROWTH AUDIT LOG ===
+Canvas: 800x600px   Camera: z=360   FOV: 60deg   Aspect: 1.333
+Frustum at z=0: x in [-277.1, +277.1]  y in [-207.8, +207.8]
+clampToView MARGIN: 0.75  (NDC must stay within +-0.75 after clamp)
+
+--- SPAWN TRACE (new A nodes only) ---
+
+Node: A_new0   maxR before spawn: 129.9
+  1. raw position         : (-67.36, -147.18, 35.02)   NDC(-0.2693, -0.7844)
+  2. after initial clamp  : (-64.69, -141.32, 33.62)   NDC(-0.2575, -0.75)
+  3. after spring (30 itr): (-11.99, -151.23, 48.49)   NDC(-0.05, -0.8409)
+  4. after post-clamp     : (-10.85, -136.88, 43.89)   NDC(-0.0446, -0.75)
+  5. final mesh position  : (-10.85, -136.88, 43.89)   NDC(-0.0446, -0.75)
+  In view at end: YES
+
+Node: A_new1   maxR before spawn: 144.2
+  1. raw position         : (-54.42, -158.98, 33.13)   NDC(-0.2163, -0.8424)
+  2. after initial clamp  : (-48.94, -142.98, 29.79)   NDC(-0.1926, -0.75)
+  3. after spring (30 itr): (-51.8, -175.19, 22.3)   NDC(-0.1993, -0.8985)
+  4. after post-clamp     : (-43.69, -147.74, 18.81)   NDC(-0.1663, -0.75)
+  5. final mesh position  : (-43.69, -147.74, 18.81)   NDC(-0.1663, -0.75)
+  In view at end: YES
+
+Node: A_new2   maxR before spawn: 158.8
+  1. raw position         : (-52.89, -178.57, 47.88)   NDC(-0.2201, -0.991)
+  2. after initial clamp  : (-41.36, -139.67, 37.45)   NDC(-0.1666, -0.75)
+  3. after spring (30 itr): (-63.04, -191.47, 82.11)   NDC(-0.2947, -1.1934) <-- OFF SCREEN
+  4. after post-clamp     : (-43.29, -131.47, 56.38)   NDC(-0.1852, -0.75)
+  5. final mesh position  : (-43.29, -131.47, 56.38)   NDC(-0.1852, -0.75)
+  In view at end: YES
+
+Node: A_new3   maxR before spawn: 183.0
+  1. raw position         : (-34.16, -201.54, 51.92)   NDC(-0.144, -1.1331) <-- OFF SCREEN
+  2. after initial clamp  : (-23.77, -140.24, 36.13)   NDC(-0.0953, -0.75)
+  3. after spring (30 itr): (-11, -219.16, 58.36)   NDC(-0.0474, -1.2585) <-- OFF SCREEN
+  4. after post-clamp     : (-7.01, -139.77, 37.22)   NDC(-0.0282, -0.75)
+  5. final mesh position  : (-7.01, -139.77, 37.22)   NDC(-0.0282, -0.75)
+  In view at end: YES
+
+Node: A_new4   maxR before spawn: 214.6
+  1. raw position         : (-55.65, -238.92, 49.32)   NDC(-0.2327, -1.332) <-- OFF SCREEN
+  2. after initial clamp  : (-33.33, -143.09, 29.54)   NDC(-0.131, -0.75)
+  3. after spring (30 itr): (0.86, -223.14, -3.75)   NDC(0.0031, -1.0625) <-- OFF SCREEN
+  4. after post-clamp     : (0.61, -157.03, -2.64)   NDC(0.0022, -0.75)
+  5. final mesh position  : (0.61, -157.03, -2.64)   NDC(0.0022, -0.75)
+  In view at end: YES
+
+--- ALL NODES AT ANIMATION END ---
+id          type  world x   world y   world z   NDC x    NDC y    in view?
+--------------------------------------------------------------------------------
+B0          B     -28.11    -1.69     -11.85    -0.0982  -0.0079  OK
+B1          B     15.13     26.84     -13.02    0.0527   0.1246   OK
+B2          B     4.19      9.40      38.59     0.0169   0.0507   OK
+B3          B     -24.71    48.96     14.43     -0.0929  0.2454   OK
+B4          B     19.82     -22.05    -7.53     0.0701   -0.1039  OK
+A0          A     -68.59    94.58     -30.02    -0.2284  0.4200   OK
+A1          A     -3.98     48.17     -95.49    -0.0113  0.1832   OK
+A2          A     64.12     11.62     -56.51    0.2000   0.0483   OK
+A3          A     54.49     90.20     3.33      0.1985   0.4380   OK
+A4          A     0.74      131.73    -79.44    0.0022   0.5192   OK
+A5          A     -63.14    35.25     -85.98    -0.1839  0.1369   OK
+A6          A     -11.95    -50.69    -88.28    -0.0346  -0.1958  OK
+A7          A     82.65     -44.24    -19.01    0.2833   -0.2022  OK
+A8          A     114.46    48.87     18.76     0.4357   0.2481   OK
+A9          A     50.86     86.58     -54.24    0.1595   0.3620   OK
+A10         A     -0.51     -4.81     -123.38   -0.0014  -0.0172  OK
+A11         A     -24.05    -79.45    -12.91    -0.0838  -0.3690  OK
+A12         A     21.95     -59.39    45.33     0.0906   -0.3269  OK
+A13         A     48.02     40.41     85.63     0.2273   0.2551   OK
+A14         A     -7.73     118.28    36.35     -0.0310  0.6330   OK
+A_new0      A     -17.65    -158.43   37.67     -0.0711  -0.8513  OK
+A_new1      A     -79.54    -134.77   48.76     -0.3320  -0.7500  OK
+A_new2      A     -61.40    -187.95   85.01     -0.2901  -1.1838  OFF-SCREEN
+A_new3      A     -7.50     -222.06   58.54     -0.0323  -1.2759  OFF-SCREEN
+A_new4      A     0.61      -157.03   -2.64     0.0022   -0.7500  OK
