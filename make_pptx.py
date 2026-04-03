@@ -14,11 +14,15 @@ from pptx.dml.color import RGBColor
 
 # ── Slide order and labels ────────────────────────────────────────────────────
 SLIDES = [
-    ("gif1-frontier-growth.gif",  "GIF 1 — A Frontier Growth"),
-    ("gif2-a-to-b.gif",           "GIF 2 — A→B Maturation"),
-    ("gif3-u-filtering.gif",      "GIF 3 — U Filtering (combined)"),
-    ("gif3-u1-snap.gif",          "GIF 3a — U1 Snap"),
-    ("gif3-u2-fade.gif",          "GIF 3b — U2 Fade"),
+    ("gif1-frontier-growth.gif",          "GIF 1 — A Frontier Growth"),
+    ("gif2-a-to-b.gif",                   "GIF 2 — A→B Maturation"),
+    ("gif3-u-filtering.gif",              "GIF 3 — U Filtering (combined)"),
+    ("gif3-u1-snap.gif",                  "GIF 3a — U1 Snap"),
+    ("gif3-u2-fade.gif",                  "GIF 3b — U2 Fade"),
+    ("mal1-maladaptive-b-fires.gif",      "Mal 1 — B₀ fires at person"),
+    ("mal2-feedback-rejected.gif",        "Mal 2 — Person feedback rejected"),
+    ("mal3-feedback-integrated-equal.gif","Mal 3 — Feedback integrated, equal orbit"),
+    ("mal4-feedback-integrated-dominant.gif","Mal 4 — Feedback integrated, dominant"),
 ]
 
 BASE = Path(__file__).parent / "gifs"
