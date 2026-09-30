@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mv index.html A-frontier.html)",
+      "Bash(mv gif3.html U-book-and-person.html)",
+      "Bash(mv gif3-u1.html U-to-A.html)",
+      "Bash(mv gif3-u2.html U-rejected.html)",
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(npx --version)",
+      "Bash(pip3 list:*)",
+      "Bash(npx playwright:*)",
+      "Bash(npm init:*)",
+      "Bash(npm install:*)",
+      "Bash(node export_gifs.js)",
+      "Bash(rm export_gifs.js package.json package-lock.json)",
+      "Bash(rm -rf node_modules)"
+    ]
+  }
+}
